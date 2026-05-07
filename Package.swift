@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "HurleyRecordingKit",
+    name: "WatchMotionRecordingKit",
     platforms: [
         .iOS(.v18),
         .watchOS(.v11),
@@ -10,17 +10,17 @@ let package = Package(
     ],
     products: [
         .library(
-            name: "HurleyRecordingKit",
-            targets: ["HurleyRecordingKit"]
+            name: "WatchMotionRecordingKit",
+            targets: ["WatchMotionRecordingKit"]
         ),
     ],
     targets: [
         .target(
-            name: "HurleyRecordingKit"
+            name: "WatchMotionRecordingKit"
         ),
         .testTarget(
-            name: "HurleyRecordingKitTests",
-            dependencies: ["HurleyRecordingKit"]
+            name: "WatchMotionRecordingKitTests",
+            dependencies: ["WatchMotionRecordingKit"]
         ),
     ]
 )

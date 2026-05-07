@@ -1,7 +1,7 @@
 import XCTest
-@testable import HurleyRecordingKit
+@testable import WatchMotionRecordingKit
 
-final class HurleyRecordingKitTests: XCTestCase {
+final class WatchMotionRecordingKitTests: XCTestCase {
     func testRecordingControlMessageRoundTripsThroughDictionary() {
         let message = RecordingControlMessage(
             action: .prepare,
