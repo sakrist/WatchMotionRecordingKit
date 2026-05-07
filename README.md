@@ -1,6 +1,6 @@
 # WatchMotionRecordingKit
 
-Reusable recording primitives extracted from HurleyMetric.
+Reusable recording primitives.
 
 ## What It Contains
 
