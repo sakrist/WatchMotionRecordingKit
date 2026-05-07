@@ -7,15 +7,18 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
     public let requestedDeviceMotionInterval: TimeInterval
     public let scheduledLeadTime: TimeInterval
     public let maxHistorySamples: Int
+    public let recordsAudio: Bool
 
     public init(
         requestedDeviceMotionInterval: TimeInterval = 1.0 / 200.0,
         scheduledLeadTime: TimeInterval = 2.0,
-        maxHistorySamples: Int = 150
+        maxHistorySamples: Int = 150,
+        recordsAudio: Bool = true
     ) {
         self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
         self.scheduledLeadTime = scheduledLeadTime
         self.maxHistorySamples = maxHistorySamples
+        self.recordsAudio = recordsAudio
     }
 }
 
@@ -84,7 +87,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
         audioRecorder = nil
         isArmed = false
         countdownSecondsRemaining = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        if configuration.recordsAudio {
+            try? AVAudioSession.sharedInstance().setActive(false)
+        }
 
         let handle = fileHandle
         fileHandle = nil
@@ -100,7 +105,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
             transport.sendRecordingControl(action: .stop, sessionID: sessionID)
             let files = [currentCSVFileURL, currentAudioFileURL, currentMetadataFileURL].compactMap { $0 }
             transport.transferRecordingFiles(sessionID: sessionID, fileURLs: files)
-            statusMessage = "Stopped (queued CSV + audio)"
+            statusMessage = configuration.recordsAudio ? "Stopped (queued motion + audio)" : "Stopped (queued motion)"
         } else {
             statusMessage = "Stopped"
         }
@@ -120,19 +125,21 @@ public final class WatchRecordingCoordinator: ObservableObject {
             return
         }
 
-        let hasAudioPermission = await requestAudioPermission()
-        guard hasAudioPermission else {
-            setStatus("Microphone permission denied")
-            return
+        if configuration.recordsAudio {
+            let hasAudioPermission = await requestAudioPermission()
+            guard hasAudioPermission else {
+                setStatus("Microphone permission denied")
+                return
+            }
         }
 
         do {
             let sessionID = Self.makeSessionID()
             let csvFileURL = try createRecordingFileURL(sessionID: sessionID, fileExtension: "csv")
-            let audioFileURL = try createRecordingFileURL(sessionID: sessionID, fileExtension: "m4a")
             let metadataFileURL = try createMetadataFileURL(sessionID: sessionID)
             let handle = try prepareLogFile(at: csvFileURL)
-            let recorder = try prepareAudioRecorder(at: audioFileURL)
+            let audioFileURL = configuration.recordsAudio ? try createRecordingFileURL(sessionID: sessionID, fileExtension: "m4a") : nil
+            let recorder = try audioFileURL.map { try prepareAudioRecorder(at: $0) }
 
             fileHandle = handle
             currentCSVFileURL = csvFileURL
@@ -168,7 +175,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
                 createdUnix: preRollStartUnix
             )
 
-            recorder.record(atTime: recorder.deviceCurrentTime + max(0, plannedStartUnix - preRollStartUnix))
+            if let recorder {
+                recorder.record(atTime: recorder.deviceCurrentTime + max(0, plannedStartUnix - preRollStartUnix))
+            }
 
             motionManager.deviceMotionUpdateInterval = configuration.requestedDeviceMotionInterval
             motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
@@ -200,7 +209,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
             isArmed = false
             countdownSecondsRemaining = nil
             transport.sendRecordingControl(action: .start, sessionID: sessionID)
-            statusMessage = "Recording motion + audio"
+            statusMessage = configuration.recordsAudio ? "Recording motion + audio" : "Recording motion"
         } catch {
             isArmed = false
             countdownSecondsRemaining = nil
