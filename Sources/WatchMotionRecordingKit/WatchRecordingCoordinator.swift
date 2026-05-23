@@ -2,23 +2,30 @@ import Foundation
 import CoreMotion
 import Combine
 import AVFoundation
+import OSLog
 
 public struct WatchRecordingConfiguration: Sendable, Equatable {
     public let requestedDeviceMotionInterval: TimeInterval
     public let scheduledLeadTime: TimeInterval
     public let maxHistorySamples: Int
     public let recordsAudio: Bool
+    public let coordinatesWithPhoneRecording: Bool
+    public let fileSynchronizationInterval: TimeInterval
 
     public init(
         requestedDeviceMotionInterval: TimeInterval = 1.0 / 200.0,
         scheduledLeadTime: TimeInterval = 2.0,
         maxHistorySamples: Int = 150,
-        recordsAudio: Bool = true
+        recordsAudio: Bool = true,
+        coordinatesWithPhoneRecording: Bool = true,
+        fileSynchronizationInterval: TimeInterval = 60
     ) {
         self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
         self.scheduledLeadTime = scheduledLeadTime
         self.maxHistorySamples = maxHistorySamples
         self.recordsAudio = recordsAudio
+        self.coordinatesWithPhoneRecording = coordinatesWithPhoneRecording
+        self.fileSynchronizationInterval = fileSynchronizationInterval
     }
 }
 
@@ -33,10 +40,12 @@ public final class WatchRecordingCoordinator: ObservableObject {
     @Published public private(set) var isArmed = false
     @Published public private(set) var countdownSecondsRemaining: Double?
     @Published public private(set) var statusMessage = "Idle"
+    @Published public private(set) var pendingSyncSessionCount = 0
 
     private let configuration: WatchRecordingConfiguration
+    private let logger = Logger(subsystem: "com.sakrist.WatchMotionRecordingKit", category: "WatchRecorder")
     private let motionManager: CMMotionManager
-    private let transport: any WatchRecordingTransport
+    private var transport: any WatchRecordingTransport
     private let motionQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "WatchRecordingCoordinator.MotionQueue"
@@ -53,6 +62,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
     private var audioRecorder: AVAudioRecorder?
     private var currentWatchMetadata: WatchRecordingMetadata?
     private var sampleTimingController: WatchSampleTimingController?
+    private var lastFileSynchronizationUnix = 0.0
 
     public init(
         configuration: WatchRecordingConfiguration = WatchRecordingConfiguration(),
@@ -62,7 +72,13 @@ public final class WatchRecordingCoordinator: ObservableObject {
         self.configuration = configuration
         self.motionManager = motionManager
         self.transport = transport
+        self.transport.fileTransferCompletionHandler = { [weak self] _, _ in
+            self?.refreshPendingSyncSessionCount()
+        }
         transport.activate()
+        logger.info("Recorder initialized. audio=\(configuration.recordsAudio), phoneCoordination=\(configuration.coordinatesWithPhoneRecording), syncInterval=\(configuration.fileSynchronizationInterval)")
+        refreshPendingSyncSessionCount()
+        retryPendingRecordingTransfers()
     }
 
     deinit {
@@ -102,9 +118,13 @@ public final class WatchRecordingCoordinator: ObservableObject {
         isRecording = false
 
         if let sessionID = currentSessionID {
-            transport.sendRecordingControl(action: .stop, sessionID: sessionID)
+            if configuration.coordinatesWithPhoneRecording {
+                transport.sendRecordingControl(action: .stop, sessionID: sessionID)
+            }
             let files = [currentCSVFileURL, currentAudioFileURL, currentMetadataFileURL].compactMap { $0 }
+            logger.info("Stopping session \(sessionID, privacy: .public). samples=\(self.sampleCount), queueing files=\(files.map(\.lastPathComponent).joined(separator: ","), privacy: .public)")
             transport.transferRecordingFiles(sessionID: sessionID, fileURLs: files)
+            refreshPendingSyncSessionCount()
             statusMessage = configuration.recordsAudio ? "Stopped (queued motion + audio)" : "Stopped (queued motion)"
         } else {
             statusMessage = "Stopped"
@@ -117,6 +137,55 @@ public final class WatchRecordingCoordinator: ObservableObject {
 
     public func stopLogging() {
         stopRecording()
+    }
+
+    public func recordStrikeRating(_ value: Int, at date: Date = Date()) {
+        guard isRecording, let currentWatchMetadata else { return }
+
+        var strikeRatings = currentWatchMetadata.strikeRatings
+        strikeRatings.append(
+            WatchStrikeRatingEvent(
+                value: value,
+                recordedUnix: date.timeIntervalSince1970
+            )
+        )
+
+        self.currentWatchMetadata = WatchRecordingMetadata(
+            sessionID: currentWatchMetadata.sessionID,
+            plannedStartUnix: currentWatchMetadata.plannedStartUnix,
+            actualWatchStartUnix: currentWatchMetadata.actualWatchStartUnix,
+            requestedDeviceMotionInterval: currentWatchMetadata.requestedDeviceMotionInterval,
+            createdUnix: currentWatchMetadata.createdUnix,
+            strikeRatings: strikeRatings
+        )
+
+        do {
+            try saveCurrentWatchMetadata()
+        } catch {
+            setStatus("Rating write error: \(error.localizedDescription)")
+        }
+    }
+
+    public func refreshPendingSyncSessionCount() {
+        let count = WatchPendingRecordingStore.pendingSessions().count
+        logger.info("Pending watch recording sessions: \(count)")
+
+        if Thread.isMainThread {
+            pendingSyncSessionCount = count
+        } else {
+            DispatchQueue.main.async {
+                self.pendingSyncSessionCount = count
+            }
+        }
+    }
+
+    public func retryPendingRecordingTransfers() {
+        let pendingSessions = WatchPendingRecordingStore.pendingSessions()
+        logger.info("Retrying pending transfers. sessions=\(pendingSessions.count)")
+        for session in pendingSessions {
+            transport.transferRecordingFiles(sessionID: session.sessionID, fileURLs: session.fileURLs)
+        }
+        refreshPendingSyncSessionCount()
     }
 
     private func startRecordingSession() async {
@@ -135,6 +204,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
 
         do {
             let sessionID = Self.makeSessionID()
+            logger.info("Starting recording session \(sessionID, privacy: .public)")
             let csvFileURL = try createRecordingFileURL(sessionID: sessionID, fileExtension: "csv")
             let metadataFileURL = try createMetadataFileURL(sessionID: sessionID)
             let handle = try prepareLogFile(at: csvFileURL)
@@ -151,6 +221,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
             sampleCount = 0
             latestAccelMagnitude = 0
             latestGyroMagnitude = 0
+            lastFileSynchronizationUnix = Date().timeIntervalSince1970
             recentAccelMagnitudes.removeAll(keepingCapacity: true)
             recentGyroMagnitudes.removeAll(keepingCapacity: true)
             isArmed = false
@@ -159,10 +230,17 @@ public final class WatchRecordingCoordinator: ObservableObject {
             currentWatchMetadata = nil
             sampleTimingController = nil
 
-            let scheduledStart = await transport.requestScheduledStart(
-                sessionID: sessionID,
-                leadTime: configuration.scheduledLeadTime
-            )
+            let scheduledStart = if configuration.coordinatesWithPhoneRecording {
+                await transport.requestScheduledStart(
+                    sessionID: sessionID,
+                    leadTime: configuration.scheduledLeadTime
+                )
+            } else {
+                ScheduledStartResponse(
+                    plannedStartUnix: Date().timeIntervalSince1970,
+                    accepted: true
+                )
+            }
 
             let plannedStartUnix = scheduledStart?.plannedStartUnix ?? Date().timeIntervalSince1970
             let preRollStartUnix = Date().timeIntervalSince1970
@@ -171,8 +249,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
                 sessionID: sessionID,
                 plannedStartUnix: plannedStartUnix,
                 actualWatchStartUnix: plannedStartUnix,
-                requestedDeviceMotionInterval: configuration.requestedDeviceMotionInterval,
-                createdUnix: preRollStartUnix
+            requestedDeviceMotionInterval: configuration.requestedDeviceMotionInterval,
+                createdUnix: preRollStartUnix,
+                strikeRatings: []
             )
 
             if let recorder {
@@ -208,7 +287,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
 
             isArmed = false
             countdownSecondsRemaining = nil
-            transport.sendRecordingControl(action: .start, sessionID: sessionID)
+            if configuration.coordinatesWithPhoneRecording {
+                transport.sendRecordingControl(action: .start, sessionID: sessionID)
+            }
             statusMessage = configuration.recordsAudio ? "Recording motion + audio" : "Recording motion"
         } catch {
             isArmed = false
@@ -256,6 +337,12 @@ public final class WatchRecordingCoordinator: ObservableObject {
             do {
                 try handle?.seekToEnd()
                 try handle?.write(contentsOf: bytes)
+
+                let now = Date().timeIntervalSince1970
+                if now - self.lastFileSynchronizationUnix >= self.configuration.fileSynchronizationInterval {
+                    try handle?.synchronize()
+                    self.lastFileSynchronizationUnix = now
+                }
             } catch {
                 DispatchQueue.main.async {
                     self.setStatus("Write error: \(error.localizedDescription)")
@@ -304,23 +391,15 @@ public final class WatchRecordingCoordinator: ObservableObject {
     }
 
     private func createRecordingFileURL(sessionID: String, fileExtension: String) throws -> URL {
-        let documentsDirectory = try FileManager.default.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
+        let documentsDirectory = WatchPendingRecordingStore.recordingsDirectoryURL()
+        try FileManager.default.createDirectory(at: documentsDirectory, withIntermediateDirectories: true)
 
         return documentsDirectory.appendingPathComponent("recording_\(sessionID).\(fileExtension)")
     }
 
     private func createMetadataFileURL(sessionID: String) throws -> URL {
-        let documentsDirectory = try FileManager.default.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
+        let documentsDirectory = WatchPendingRecordingStore.recordingsDirectoryURL()
+        try FileManager.default.createDirectory(at: documentsDirectory, withIntermediateDirectories: true)
 
         return documentsDirectory.appendingPathComponent("recording_\(sessionID).watch.json")
     }
@@ -367,7 +446,8 @@ public final class WatchRecordingCoordinator: ObservableObject {
             plannedStartUnix: currentWatchMetadata.plannedStartUnix,
             actualWatchStartUnix: actualWatchStartUnix,
             requestedDeviceMotionInterval: currentWatchMetadata.requestedDeviceMotionInterval,
-            createdUnix: currentWatchMetadata.createdUnix
+            createdUnix: currentWatchMetadata.createdUnix,
+            strikeRatings: currentWatchMetadata.strikeRatings
         )
 
         do {

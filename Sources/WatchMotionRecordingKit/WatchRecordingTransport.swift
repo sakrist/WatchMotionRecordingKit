@@ -1,7 +1,10 @@
 import Foundation
+import OSLog
 import WatchConnectivity
 
 public protocol WatchRecordingTransport: AnyObject {
+    var fileTransferCompletionHandler: ((URL, Error?) -> Void)? { get set }
+
     func activate()
     func transferRecordingFiles(sessionID: String, fileURLs: [URL])
     func sendRecordingControl(action: RecordingControlAction, sessionID: String)
@@ -9,6 +12,9 @@ public protocol WatchRecordingTransport: AnyObject {
 }
 
 public final class WatchConnectivityRecordingTransport: NSObject, WatchRecordingTransport, WCSessionDelegate {
+    public var fileTransferCompletionHandler: ((URL, Error?) -> Void)?
+    private let logger = Logger(subsystem: "com.sakrist.WatchMotionRecordingKit", category: "WatchTransfer")
+
     public override init() {
         super.init()
     }
@@ -19,22 +25,31 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         let session = WCSession.default
         session.delegate = self
         session.activate()
+        logger.info("WCSession activate requested")
     }
 
     public func transferRecordingFiles(sessionID: String, fileURLs: [URL]) {
-        guard WCSession.isSupported() else { return }
+        guard WCSession.isSupported() else {
+            logger.error("WCSession unsupported; cannot transfer session \(sessionID, privacy: .public)")
+            return
+        }
 
         let session = WCSession.default
         if session.activationState != .activated {
             session.delegate = self
             session.activate()
+            logger.info("WCSession not activated; activation requested before transfer for session \(sessionID, privacy: .public)")
         }
 
-        for fileURL in fileURLs {
+        let outstandingPaths = Set(session.outstandingFileTransfers.map(\.file.fileURL.path))
+        logger.info("Transfer requested for session \(sessionID, privacy: .public), files \(fileURLs.count), outstanding \(outstandingPaths.count), activation \(String(describing: session.activationState), privacy: .public)")
+
+        for fileURL in fileURLs where !outstandingPaths.contains(fileURL.path) {
             session.transferFile(fileURL, metadata: [
                 "fileName": fileURL.lastPathComponent,
                 "sessionID": sessionID,
             ])
+            logger.info("Queued file transfer \(fileURL.lastPathComponent, privacy: .public)")
         }
     }
 
@@ -74,7 +89,28 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         activationDidCompleteWith activationState: WCSessionActivationState,
         error: Error?
     ) {
-        // Transfers are queued by the system when the counterpart is unavailable.
+        if let error {
+            logger.error("WCSession activation failed: \(error.localizedDescription, privacy: .public)")
+        } else {
+            logger.info("WCSession activation completed: \(String(describing: activationState), privacy: .public)")
+        }
+    }
+
+    public func session(
+        _ session: WCSession,
+        didFinish fileTransfer: WCSessionFileTransfer,
+        error: Error?
+    ) {
+        let fileURL = fileTransfer.file.fileURL
+
+        if error == nil {
+            try? FileManager.default.removeItem(at: fileURL)
+            logger.info("File transfer finished and local file removed: \(fileURL.lastPathComponent, privacy: .public)")
+        } else if let error {
+            logger.error("File transfer failed for \(fileURL.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+
+        fileTransferCompletionHandler?(fileURL, error)
     }
 
 #if os(iOS)

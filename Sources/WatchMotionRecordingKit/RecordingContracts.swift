@@ -117,18 +117,31 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
     public let actualWatchStartUnix: Double
     public let requestedDeviceMotionInterval: Double
     public let createdUnix: Double
+    public let strikeRatings: [WatchStrikeRatingEvent]
 
     public init(
         sessionID: String,
         plannedStartUnix: Double,
         actualWatchStartUnix: Double,
         requestedDeviceMotionInterval: Double,
-        createdUnix: Double
+        createdUnix: Double,
+        strikeRatings: [WatchStrikeRatingEvent] = []
     ) {
         self.sessionID = sessionID
         self.plannedStartUnix = plannedStartUnix
         self.actualWatchStartUnix = actualWatchStartUnix
         self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
         self.createdUnix = createdUnix
+        self.strikeRatings = strikeRatings
+    }
+}
+
+public struct WatchStrikeRatingEvent: Codable, Sendable, Equatable {
+    public let value: Int
+    public let recordedUnix: Double
+
+    public init(value: Int, recordedUnix: Double) {
+        self.value = min(max(value, 1), 10)
+        self.recordedUnix = recordedUnix
     }
 }

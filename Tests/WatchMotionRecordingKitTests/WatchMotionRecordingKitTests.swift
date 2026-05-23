@@ -62,4 +62,50 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertTrue(second.isFirstAcceptedSample)
         XCTAssertEqual(second.sampleUnixTime, 200.02, accuracy: 0.000_001)
     }
+
+    func testImmediateWatchOnlySessionKeepsSamplesFromStartThroughEnd() {
+        var controller = WatchSampleTimingController(startUnixTime: 1_000.0)
+
+        let decisions = stride(from: 0.0, through: 6.0, by: 1.0).map { offset in
+            controller.evaluate(
+                motionTimestamp: 50.0 + offset,
+                unixNow: 1_000.0 + offset
+            )
+        }
+
+        XCTAssertEqual(decisions.count, 7)
+        XCTAssertTrue(decisions.allSatisfy(\.shouldKeepSample))
+        XCTAssertTrue(decisions[0].isFirstAcceptedSample)
+        XCTAssertFalse(decisions[6].isFirstAcceptedSample)
+        XCTAssertEqual(decisions[0].sampleUnixTime, 1_000.0, accuracy: 0.000_001)
+        XCTAssertEqual(decisions[6].sampleUnixTime, 1_006.0, accuracy: 0.000_001)
+    }
+
+    func testPhoneCoordinatedSessionDropsSamplesBeforePlannedStart() {
+        var controller = WatchSampleTimingController(startUnixTime: 1_002.0)
+
+        let decisions = stride(from: 0.0, through: 6.0, by: 1.0).map { offset in
+            controller.evaluate(
+                motionTimestamp: 50.0 + offset,
+                unixNow: 1_000.0 + offset
+            )
+        }
+
+        XCTAssertFalse(decisions[0].shouldKeepSample)
+        XCTAssertFalse(decisions[1].shouldKeepSample)
+        XCTAssertTrue(decisions[2].shouldKeepSample)
+        XCTAssertTrue(decisions[2].isFirstAcceptedSample)
+        XCTAssertTrue(decisions[6].shouldKeepSample)
+        XCTAssertEqual(decisions[6].sampleUnixTime, 1_006.0, accuracy: 0.000_001)
+    }
+
+    func testConfigurationCanDisablePhoneRecordingCoordination() {
+        let configuration = WatchRecordingConfiguration(
+            recordsAudio: false,
+            coordinatesWithPhoneRecording: false
+        )
+
+        XCTAssertFalse(configuration.recordsAudio)
+        XCTAssertFalse(configuration.coordinatesWithPhoneRecording)
+    }
 }
