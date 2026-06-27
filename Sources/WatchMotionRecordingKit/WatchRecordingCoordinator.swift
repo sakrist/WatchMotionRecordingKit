@@ -54,6 +54,7 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
     public let coordinatesWithPhoneRecording: Bool
     public let fileSynchronizationInterval: TimeInterval
     public let csvFields: [WatchRecordingCSVField]
+    public let retainedSessionLimit: Int
 
     public init(
         requestedDeviceMotionInterval: TimeInterval = 1.0 / 200.0,
@@ -62,7 +63,8 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
         recordsAudio: Bool = true,
         coordinatesWithPhoneRecording: Bool = true,
         fileSynchronizationInterval: TimeInterval = 60,
-        csvFields: [WatchRecordingCSVField] = WatchRecordingCSVField.defaultFields
+        csvFields: [WatchRecordingCSVField] = WatchRecordingCSVField.defaultFields,
+        retainedSessionLimit: Int = 10
     ) {
         self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
         self.scheduledLeadTime = scheduledLeadTime
@@ -71,6 +73,7 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
         self.coordinatesWithPhoneRecording = coordinatesWithPhoneRecording
         self.fileSynchronizationInterval = fileSynchronizationInterval
         self.csvFields = csvFields
+        self.retainedSessionLimit = retainedSessionLimit
     }
 }
 
@@ -118,8 +121,12 @@ public final class WatchRecordingCoordinator: ObservableObject {
         self.configuration = configuration
         self.motionManager = motionManager
         self.transport = transport
-        self.transport.fileTransferCompletionHandler = { [weak self] _, _ in
-            self?.refreshPendingSyncSessionCount()
+        self.transport.fileTransferCompletionHandler = { [weak self] _, error in
+            guard let self else { return }
+            if error == nil {
+                WatchPendingRecordingStore.trimStoredSessions(retainingLast: self.configuration.retainedSessionLimit)
+            }
+            self.refreshPendingSyncSessionCount()
         }
         self.transport.pendingTransferRetryRequestHandler = { [weak self] in
             self?.retryPendingRecordingTransfers()

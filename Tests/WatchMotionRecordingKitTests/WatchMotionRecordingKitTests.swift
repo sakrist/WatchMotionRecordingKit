@@ -107,6 +107,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
 
         XCTAssertFalse(configuration.recordsAudio)
         XCTAssertFalse(configuration.coordinatesWithPhoneRecording)
+        XCTAssertEqual(configuration.retainedSessionLimit, 10)
     }
 
     func testConfigurationDefaultsToCurrentCSVFields() {

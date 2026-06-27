@@ -118,7 +118,6 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
 
         if error == nil {
             WatchPendingRecordingStore.markFileSynced(fileURL)
-            WatchPendingRecordingStore.trimStoredSessions()
             logger.info("File transfer finished and local file marked synced: \(fileURL.lastPathComponent, privacy: .public)")
         } else if let error {
             logger.error("File transfer failed for \(fileURL.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
