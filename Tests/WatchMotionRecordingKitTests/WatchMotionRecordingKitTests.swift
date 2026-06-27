@@ -35,7 +35,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(second, 1710000000.515, accuracy: 0.000_001)
     }
 
-    func testScheduledSampleGateRejectsPrerollAndMarksFirstAcceptedSample() {
+    func testScheduledSampleGateRejectsPrerollAndMarksFirstAcceptedSample() throws {
         var gate = ScheduledSampleGate(startUnixTime: 100.0)
 
         let early = gate.evaluate(sampleUnixTime: 99.99)
@@ -48,7 +48,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertTrue(first.isFirstAcceptedSample)
         XCTAssertTrue(second.shouldKeepSample)
         XCTAssertFalse(second.isFirstAcceptedSample)
-        XCTAssertEqual(gate.firstAcceptedSampleUnixTime, 100.001, accuracy: 0.000_001)
+        XCTAssertEqual(try XCTUnwrap(gate.firstAcceptedSampleUnixTime), 100.001, accuracy: 0.000_001)
     }
 
     func testWatchSampleTimingControllerCombinesProjectionAndGate() {
