@@ -108,4 +108,73 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertFalse(configuration.recordsAudio)
         XCTAssertFalse(configuration.coordinatesWithPhoneRecording)
     }
+
+    func testConfigurationDefaultsToCurrentCSVFields() {
+        let configuration = WatchRecordingConfiguration()
+
+        XCTAssertEqual(
+            configuration.csvFields.map(\.rawValue),
+            [
+                "timestamp",
+                "ax",
+                "ay",
+                "az",
+                "gx",
+                "gy",
+                "gz",
+                "grx",
+                "gry",
+                "grz",
+                "qw",
+                "qx",
+                "qy",
+                "qz",
+                "heading",
+                "mX",
+                "mY",
+                "mZ",
+            ]
+        )
+    }
+
+    func testPendingSessionsKeepMetadataOnlyRetriesAfterCSVTransfers() throws {
+        let sessionID = "unit_retry_metadata_only_\(UUID().uuidString)"
+        let directoryURL = WatchPendingRecordingStore.recordingsDirectoryURL()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let metadataURL = directoryURL.appendingPathComponent("recording_\(sessionID).watch.json")
+        defer {
+            try? FileManager.default.removeItem(at: metadataURL)
+        }
+
+        try #"{"applicationPayloads":{"camanlab.strikeRatings":"{\"ratings\":[]}"}}"#
+            .write(to: metadataURL, atomically: true, encoding: .utf8)
+
+        let pendingSession = WatchPendingRecordingStore.pendingSessions()
+            .first { $0.sessionID == sessionID }
+
+        XCTAssertEqual(pendingSession?.fileURLs, [metadataURL])
+    }
+
+    func testSyncedMarkersHideFilesUntilReset() throws {
+        let sessionID = "unit_synced_marker_\(UUID().uuidString)"
+        let directoryURL = WatchPendingRecordingStore.recordingsDirectoryURL()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let csvURL = directoryURL.appendingPathComponent("recording_\(sessionID).csv")
+        let markerURL = directoryURL.appendingPathComponent(".\(csvURL.lastPathComponent).synced")
+        defer {
+            try? FileManager.default.removeItem(at: csvURL)
+            try? FileManager.default.removeItem(at: markerURL)
+        }
+
+        try "timestamp,ax,ay,az,gx,gy,gz,grx,gry,grz\n"
+            .write(to: csvURL, atomically: true, encoding: .utf8)
+
+        XCTAssertNotNil(WatchPendingRecordingStore.pendingSessions().first { $0.sessionID == sessionID })
+
+        WatchPendingRecordingStore.markFileSynced(csvURL)
+        XCTAssertNil(WatchPendingRecordingStore.pendingSessions().first { $0.sessionID == sessionID })
+
+        WatchPendingRecordingStore.resetSyncMarkers()
+        XCTAssertNotNil(WatchPendingRecordingStore.pendingSessions().first { $0.sessionID == sessionID })
+    }
 }

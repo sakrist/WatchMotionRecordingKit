@@ -4,8 +4,10 @@ import WatchConnectivity
 
 public protocol WatchRecordingTransport: AnyObject {
     var fileTransferCompletionHandler: ((URL, Error?) -> Void)? { get set }
+    var pendingTransferRetryRequestHandler: (() -> Void)? { get set }
 
     func activate()
+    func cancelOutstandingFileTransfers()
     func transferRecordingFiles(sessionID: String, fileURLs: [URL])
     func sendRecordingControl(action: RecordingControlAction, sessionID: String)
     func requestScheduledStart(sessionID: String, leadTime: TimeInterval) async -> ScheduledStartResponse?
@@ -13,6 +15,7 @@ public protocol WatchRecordingTransport: AnyObject {
 
 public final class WatchConnectivityRecordingTransport: NSObject, WatchRecordingTransport, WCSessionDelegate {
     public var fileTransferCompletionHandler: ((URL, Error?) -> Void)?
+    public var pendingTransferRetryRequestHandler: (() -> Void)?
     private let logger = Logger(subsystem: "com.sakrist.WatchMotionRecordingKit", category: "WatchTransfer")
 
     public override init() {
@@ -26,6 +29,16 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         session.delegate = self
         session.activate()
         logger.info("WCSession activate requested")
+    }
+
+    public func cancelOutstandingFileTransfers() {
+        guard WCSession.isSupported() else { return }
+
+        let transfers = WCSession.default.outstandingFileTransfers
+        for transfer in transfers {
+            transfer.cancel()
+        }
+        logger.info("Cancelled outstanding file transfers: \(transfers.count)")
     }
 
     public func transferRecordingFiles(sessionID: String, fileURLs: [URL]) {
@@ -104,13 +117,23 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         let fileURL = fileTransfer.file.fileURL
 
         if error == nil {
-            try? FileManager.default.removeItem(at: fileURL)
-            logger.info("File transfer finished and local file removed: \(fileURL.lastPathComponent, privacy: .public)")
+            WatchPendingRecordingStore.markFileSynced(fileURL)
+            WatchPendingRecordingStore.trimStoredSessions()
+            logger.info("File transfer finished and local file marked synced: \(fileURL.lastPathComponent, privacy: .public)")
         } else if let error {
             logger.error("File transfer failed for \(fileURL.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
 
         fileTransferCompletionHandler?(fileURL, error)
+    }
+
+    public func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        guard message[WatchRecordingCommand.commandKey] as? String == WatchRecordingCommand.retryPendingTransfers else {
+            return
+        }
+
+        logger.info("Received retry pending transfers command")
+        pendingTransferRetryRequestHandler?()
     }
 
 #if os(iOS)
