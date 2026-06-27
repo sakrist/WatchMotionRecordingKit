@@ -6,6 +6,11 @@ public enum RecordingControlAction: String, Codable, Sendable, CaseIterable {
     case stop
 }
 
+public enum WatchRecordingCommand {
+    public static let commandKey = "watchRecordingCommand"
+    public static let retryPendingTransfers = "retryPendingTransfers"
+}
+
 public struct RecordingControlMessage: Codable, Sendable, Equatable {
     public static let actionKey = "recordingControl"
     public static let sessionIDKey = "sessionID"
@@ -116,19 +121,46 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
     public let plannedStartUnix: Double
     public let actualWatchStartUnix: Double
     public let requestedDeviceMotionInterval: Double
+    public let attitudeReferenceFrame: String?
     public let createdUnix: Double
+    public let applicationPayloads: [String: String]
 
     public init(
         sessionID: String,
         plannedStartUnix: Double,
         actualWatchStartUnix: Double,
         requestedDeviceMotionInterval: Double,
-        createdUnix: Double
+        attitudeReferenceFrame: String? = nil,
+        createdUnix: Double,
+        applicationPayloads: [String: String] = [:]
     ) {
         self.sessionID = sessionID
         self.plannedStartUnix = plannedStartUnix
         self.actualWatchStartUnix = actualWatchStartUnix
         self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
+        self.attitudeReferenceFrame = attitudeReferenceFrame
         self.createdUnix = createdUnix
+        self.applicationPayloads = applicationPayloads
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case plannedStartUnix
+        case actualWatchStartUnix
+        case requestedDeviceMotionInterval
+        case attitudeReferenceFrame
+        case createdUnix
+        case applicationPayloads
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        plannedStartUnix = try container.decode(Double.self, forKey: .plannedStartUnix)
+        actualWatchStartUnix = try container.decode(Double.self, forKey: .actualWatchStartUnix)
+        requestedDeviceMotionInterval = try container.decode(Double.self, forKey: .requestedDeviceMotionInterval)
+        attitudeReferenceFrame = try container.decodeIfPresent(String.self, forKey: .attitudeReferenceFrame)
+        createdUnix = try container.decode(Double.self, forKey: .createdUnix)
+        applicationPayloads = try container.decodeIfPresent([String: String].self, forKey: .applicationPayloads) ?? [:]
     }
 }

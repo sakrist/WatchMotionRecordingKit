@@ -24,3 +24,4 @@ Import this package into a watch or phone app and build target-specific adapters
 - Use `RecordingControlMessage` and `ScheduledStartResponse` to encode/decode `WCSession` dictionaries.
 - Use `WatchSampleTimingController` to convert motion timestamps into Unix timestamps and drop pre-roll samples before the agreed start time.
 - Use `PhoneRecordingMetadata` and `WatchRecordingMetadata` as the shared sidecar schema.
+- Store app-specific sidecar data in `WatchRecordingMetadata.applicationPayloads`; keep domain semantics in the app target.
