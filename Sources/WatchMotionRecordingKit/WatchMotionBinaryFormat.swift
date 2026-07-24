@@ -37,8 +37,9 @@ public enum WatchRecordingAssetNaming {
         let start = fileName.index(fileName.startIndex, offsetBy: "recording_".count)
         let end = fileName.index(fileName.endIndex, offsetBy: -suffix.count)
         guard start < end else { return nil }
-        let sessionID = String(fileName[start..<end])
-        return canonicalSessionID(sessionID)
+        let candidate = String(fileName[start..<end])
+        guard let identifier = UUID(uuidString: candidate) else { return nil }
+        return identifier.uuidString.lowercased()
     }
 
     private static func canonicalSessionID(_ sessionID: String) -> String {
