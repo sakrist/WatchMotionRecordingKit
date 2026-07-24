@@ -16,7 +16,7 @@ public enum WatchPendingRecordingStore {
                     fileURLs: files.sorted { $0.lastPathComponent < $1.lastPathComponent }
                 )
             }
-            .sorted { $0.sessionID > $1.sessionID }
+            .sorted { latestFileDate(in: $0.fileURLs) > latestFileDate(in: $1.fileURLs) }
     }
 
     public static func markFileSynced(_ fileURL: URL) {
@@ -47,7 +47,7 @@ public enum WatchPendingRecordingStore {
         guard retainedSessionLimit > 0 else { return }
 
         let sessions = groupedRecordingFiles(includeSyncedFiles: true)
-            .sorted { $0.key > $1.key }
+            .sorted { latestFileDate(in: $0.value) > latestFileDate(in: $1.value) }
         let sessionsToDelete = sessions.dropFirst(retainedSessionLimit)
 
         for (_, files) in sessionsToDelete {
@@ -89,18 +89,15 @@ public enum WatchPendingRecordingStore {
     }
 
     private static func sessionID(from fileURL: URL) -> String? {
-        let fileName = fileURL.lastPathComponent
+        WatchRecordingAssetNaming.sessionID(from: fileURL.lastPathComponent)
+    }
 
-        if fileName.hasPrefix("recording_"), fileName.hasSuffix(".watch.json") {
-            return String(fileName.dropFirst("recording_".count).dropLast(".watch.json".count))
+    private static func latestFileDate(in fileURLs: [URL]) -> Date {
+        fileURLs.compactMap { url in
+            let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+            return values?.contentModificationDate ?? values?.creationDate
         }
-
-        guard fileName.hasPrefix("recording_") else { return nil }
-
-        let supportedExtensions = ["csv", "m4a"]
-        guard supportedExtensions.contains(fileURL.pathExtension) else { return nil }
-
-        return String(fileURL.deletingPathExtension().lastPathComponent.dropFirst("recording_".count))
+        .max() ?? .distantPast
     }
 
     private static func isFileSynced(_ fileURL: URL) -> Bool {

@@ -24,6 +24,20 @@ public struct UnixTimeProjector: Sendable, Equatable {
         motionTimestampAnchor = motionTimestamp
         return unixNow
     }
+
+    public mutating func project(
+        motionTimestamp: TimeInterval,
+        unixNow: Double,
+        systemUptimeNow: TimeInterval
+    ) -> Double {
+        if let unixTimeAnchor, let motionTimestampAnchor {
+            return unixTimeAnchor + (motionTimestamp - motionTimestampAnchor)
+        }
+
+        unixTimeAnchor = unixNow
+        motionTimestampAnchor = systemUptimeNow
+        return unixNow + (motionTimestamp - systemUptimeNow)
+    }
 }
 
 public struct SampleGateDecision: Sendable, Equatable {
@@ -95,6 +109,19 @@ public struct WatchSampleTimingController: Sendable, Equatable {
         let sampleUnixTime = projector.project(
             motionTimestamp: motionTimestamp,
             unixNow: unixNow
+        )
+        return gate.evaluate(sampleUnixTime: sampleUnixTime)
+    }
+
+    public mutating func evaluate(
+        motionTimestamp: TimeInterval,
+        unixNow: Double,
+        systemUptimeNow: TimeInterval
+    ) -> SampleGateDecision {
+        let sampleUnixTime = projector.project(
+            motionTimestamp: motionTimestamp,
+            unixNow: unixNow,
+            systemUptimeNow: systemUptimeNow
         )
         return gate.evaluate(sampleUnixTime: sampleUnixTime)
     }

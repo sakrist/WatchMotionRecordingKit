@@ -1,80 +1,63 @@
-import Foundation
-import CoreMotion
 import Combine
-import AVFoundation
+import CoreMotion
+import Foundation
 import OSLog
 
-public enum WatchRecordingCSVField: String, CaseIterable, Sendable, Equatable {
-    case timestamp
-    case ax
-    case ay
-    case az
-    case gx
-    case gy
-    case gz
-    case grx
-    case gry
-    case grz
-    case qw
-    case qx
-    case qy
-    case qz
-    case heading
-    case mX
-    case mY
-    case mZ
-
-    public static let defaultFields: [WatchRecordingCSVField] = [
-        .timestamp,
-        .ax,
-        .ay,
-        .az,
-        .gx,
-        .gy,
-        .gz,
-        .grx,
-        .gry,
-        .grz,
-        .qw,
-        .qx,
-        .qy,
-        .qz,
-        .heading,
-        .mX,
-        .mY,
-        .mZ,
-    ]
-}
-
 public struct WatchRecordingConfiguration: Sendable, Equatable {
-    public let requestedDeviceMotionInterval: TimeInterval
     public let scheduledLeadTime: TimeInterval
     public let maxHistorySamples: Int
-    public let recordsAudio: Bool
     public let coordinatesWithPhoneRecording: Bool
     public let fileSynchronizationInterval: TimeInterval
-    public let csvFields: [WatchRecordingCSVField]
     public let retainedSessionLimit: Int
 
     public init(
-        requestedDeviceMotionInterval: TimeInterval = 1.0 / 200.0,
         scheduledLeadTime: TimeInterval = 2.0,
         maxHistorySamples: Int = 150,
-        recordsAudio: Bool = true,
         coordinatesWithPhoneRecording: Bool = true,
         fileSynchronizationInterval: TimeInterval = 60,
-        csvFields: [WatchRecordingCSVField] = WatchRecordingCSVField.defaultFields,
         retainedSessionLimit: Int = 10
     ) {
-        self.requestedDeviceMotionInterval = requestedDeviceMotionInterval
         self.scheduledLeadTime = scheduledLeadTime
         self.maxHistorySamples = maxHistorySamples
-        self.recordsAudio = recordsAudio
         self.coordinatesWithPhoneRecording = coordinatesWithPhoneRecording
         self.fileSynchronizationInterval = fileSynchronizationInterval
-        self.csvFields = csvFields
         self.retainedSessionLimit = retainedSessionLimit
     }
+}
+
+private enum WatchMotionCaptureError: LocalizedError {
+    case unsupported
+    case deviceMotionUnavailable
+    case rawAccelerometerUnavailable
+    case emptyStream
+    case unexpectedFrequency(deviceMotion: Int, rawAccelerometer: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupported:
+            return "Recording is not supported on this Watch."
+        case .deviceMotionUnavailable:
+            return "200 Hz device motion did not start"
+        case .rawAccelerometerUnavailable:
+            return "800 Hz raw acceleration did not start"
+        case .emptyStream:
+            return "Recording stopped before both motion streams produced samples"
+        case .unexpectedFrequency(let deviceMotion, let rawAccelerometer):
+            return "Unexpected motion frequencies: \(deviceMotion)/\(rawAccelerometer) Hz"
+        }
+    }
+}
+
+private struct SendableDeviceMotionBatch: @unchecked Sendable {
+    let samples: [CMDeviceMotion]
+    let callbackUnixTime: Double
+    let callbackSystemUptime: TimeInterval
+}
+
+private struct SendableAccelerometerBatch: @unchecked Sendable {
+    let samples: [CMAccelerometerData]
+    let callbackUnixTime: Double
+    let callbackSystemUptime: TimeInterval
 }
 
 public final class WatchRecordingCoordinator: ObservableObject {
@@ -92,34 +75,41 @@ public final class WatchRecordingCoordinator: ObservableObject {
 
     private let configuration: WatchRecordingConfiguration
     private let logger = Logger(subsystem: "com.sakrist.WatchMotionRecordingKit", category: "WatchRecorder")
-    private let motionManager: CMMotionManager
+#if os(watchOS)
+    private var batchedSensorManager: CMBatchedSensorManager?
+#endif
     private var transport: any WatchRecordingTransport
     private let motionQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "WatchRecordingCoordinator.MotionQueue"
         queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 1
         return queue
     }()
+    private let metadataLock = NSLock()
 
-    private let fileQueue = DispatchQueue(label: "WatchRecordingCoordinator.FileQueue")
-    private var fileHandle: FileHandle?
-    private var currentCSVFileURL: URL?
-    private var currentAudioFileURL: URL?
+    private var deviceMotionWriter: WatchMotionBinaryFileWriter?
+    private var rawAccelerometerWriter: WatchMotionBinaryFileWriter?
+    private var currentDeviceMotionFileURL: URL?
+    private var currentRawAccelerometerFileURL: URL?
     private var currentMetadataFileURL: URL?
     private var currentSessionID: String?
-    private var currentAttitudeReferenceFrameName: String?
-    private var audioRecorder: AVAudioRecorder?
     private var currentWatchMetadata: WatchRecordingMetadata?
-    private var sampleTimingController: WatchSampleTimingController?
+    private var timeProjector: UnixTimeProjector?
+    private var deviceMotionGate: ScheduledSampleGate?
+    private var rawAccelerometerGate: ScheduledSampleGate?
+    private var earliestAcceptedSampleUnix: Double?
     private var lastFileSynchronizationUnix = 0.0
+    private var activeMotionSessionID: String?
+    private var actualDeviceMotionFrequency: UInt16 = WatchMotionBinaryStream.deviceMotion.nominalFrequencyHz
+    private var actualRawAccelerometerFrequency: UInt16 = WatchMotionBinaryStream.rawAccelerometer.nominalFrequencyHz
+    private var isStartingRecording = false
 
     public init(
         configuration: WatchRecordingConfiguration = WatchRecordingConfiguration(),
-        motionManager: CMMotionManager = CMMotionManager(),
         transport: any WatchRecordingTransport = WatchConnectivityRecordingTransport()
     ) {
         self.configuration = configuration
-        self.motionManager = motionManager
         self.transport = transport
         self.transport.fileTransferCompletionHandler = { [weak self] _, error in
             guard let self else { return }
@@ -132,58 +122,103 @@ public final class WatchRecordingCoordinator: ObservableObject {
             self?.retryPendingRecordingTransfers()
         }
         transport.activate()
-        logger.info("Recorder initialized. audio=\(configuration.recordsAudio), phoneCoordination=\(configuration.coordinatesWithPhoneRecording), syncInterval=\(configuration.fileSynchronizationInterval)")
         refreshPendingSyncSessionCount()
         retryPendingRecordingTransfers()
     }
 
+    public static var isHighFrequencyRecordingSupported: Bool {
+#if os(watchOS)
+        CMBatchedSensorManager.isDeviceMotionSupported && CMBatchedSensorManager.isAccelerometerSupported
+#else
+        false
+#endif
+    }
+
+    public var isHighFrequencyRecordingSupported: Bool {
+        Self.isHighFrequencyRecordingSupported
+    }
+
     deinit {
-        motionManager.stopDeviceMotionUpdates()
-        audioRecorder?.stop()
-        try? fileHandle?.close()
+        stopMotionSources()
     }
 
     public func startRecording() {
-        guard !isRecording else { return }
+        guard !isRecording, !isStartingRecording else { return }
+        guard isHighFrequencyRecordingSupported else {
+            setStatus("Recording is not supported on this Watch.")
+            return
+        }
 
+        isStartingRecording = true
         Task { [weak self] in
-            await self?.startRecordingSession()
+            guard let self else { return }
+            await self.startRecordingSession()
+            self.isStartingRecording = false
         }
     }
 
     public func stopRecording() {
         guard isRecording else { return }
 
-        motionManager.stopDeviceMotionUpdates()
-        audioRecorder?.stop()
-        audioRecorder = nil
+        stopMotionCaptureAndDrain()
         isArmed = false
         countdownSecondsRemaining = nil
-        if configuration.recordsAudio {
-            try? AVAudioSession.sharedInstance().setActive(false)
-        }
 
-        let handle = fileHandle
-        fileHandle = nil
+        do {
+            guard let sessionID = currentSessionID,
+                  let deviceMotionWriter,
+                  let rawAccelerometerWriter,
+                  let currentDeviceMotionFileURL,
+                  let currentRawAccelerometerFileURL,
+                  let currentMetadataFileURL
+            else {
+                throw CocoaError(.fileWriteUnknown)
+            }
 
-        fileQueue.sync {
-            try? handle?.synchronize()
-            try? handle?.close()
-        }
+            let deviceMotionSummary = try deviceMotionWriter.finalize(
+                actualFrequencyHz: actualDeviceMotionFrequency
+            )
+            let rawAccelerometerSummary = try rawAccelerometerWriter.finalize(
+                actualFrequencyHz: actualRawAccelerometerFrequency
+            )
+            guard deviceMotionSummary.sampleCount > 0,
+                  rawAccelerometerSummary.sampleCount > 0 else {
+                throw WatchMotionCaptureError.emptyStream
+            }
+            self.deviceMotionWriter = nil
+            self.rawAccelerometerWriter = nil
+            sampleCount = Int(deviceMotionSummary.sampleCount)
 
-        isRecording = false
+            try withMetadataLock {
+                guard var metadata = currentWatchMetadata else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                if let earliestAcceptedSampleUnix {
+                    metadata = metadata.replacingActualWatchStartUnix(earliestAcceptedSampleUnix)
+                }
+                metadata = metadata.finalized(
+                    deviceMotion: deviceMotionSummary,
+                    rawAccelerometer: rawAccelerometerSummary
+                )
+                currentWatchMetadata = metadata
+                try saveWatchMetadata(to: currentMetadataFileURL, metadata: metadata)
+            }
 
-        if let sessionID = currentSessionID {
+            isRecording = false
             if configuration.coordinatesWithPhoneRecording {
                 transport.sendRecordingControl(action: .stop, sessionID: sessionID)
             }
-            let files = [currentCSVFileURL, currentAudioFileURL, currentMetadataFileURL].compactMap { $0 }
-            logger.info("Stopping session \(sessionID, privacy: .public). samples=\(self.sampleCount), queueing files=\(files.map(\.lastPathComponent).joined(separator: ","), privacy: .public)")
+            let files = [currentDeviceMotionFileURL, currentRawAccelerometerFileURL, currentMetadataFileURL]
+            logger.info(
+                "Stopping session \(sessionID, privacy: .public). deviceSamples=\(deviceMotionSummary.sampleCount), rawSamples=\(rawAccelerometerSummary.sampleCount), queueing=\(files.map(\.lastPathComponent).joined(separator: ","), privacy: .public)"
+            )
             transport.transferRecordingFiles(sessionID: sessionID, fileURLs: files)
             refreshPendingSyncSessionCount()
-            statusMessage = configuration.recordsAudio ? "Stopped (queued motion + audio)" : "Stopped (queued motion)"
-        } else {
-            statusMessage = "Stopped"
+            statusMessage = "Stopped (queued motion)"
+        } catch {
+            isRecording = false
+            cleanupIncompleteSession()
+            setStatus("Failed to finish: \(error.localizedDescription)")
         }
     }
 
@@ -196,44 +231,34 @@ public final class WatchRecordingCoordinator: ObservableObject {
     }
 
     public func applicationMetadataPayload(forKey key: String) -> String? {
-        currentWatchMetadata?.applicationPayloads[key]
+        withMetadataLock { currentWatchMetadata?.applicationPayloads[key] }
     }
 
     public func setApplicationMetadataPayload(_ payload: String?, forKey key: String) throws {
-        guard isRecording, let currentWatchMetadata else { return }
-
-        var applicationPayloads = currentWatchMetadata.applicationPayloads
-        applicationPayloads[key] = payload
-
-        self.currentWatchMetadata = WatchRecordingMetadata(
-            sessionID: currentWatchMetadata.sessionID,
-            plannedStartUnix: currentWatchMetadata.plannedStartUnix,
-            actualWatchStartUnix: currentWatchMetadata.actualWatchStartUnix,
-            requestedDeviceMotionInterval: currentWatchMetadata.requestedDeviceMotionInterval,
-            attitudeReferenceFrame: currentWatchMetadata.attitudeReferenceFrame,
-            createdUnix: currentWatchMetadata.createdUnix,
-            applicationPayloads: applicationPayloads
-        )
-
-        try saveCurrentWatchMetadata()
+        guard isRecording else { return }
+        try withMetadataLock {
+            guard let currentWatchMetadata else { return }
+            var payloads = currentWatchMetadata.applicationPayloads
+            payloads[key] = payload
+            let metadata = currentWatchMetadata.replacingApplicationPayloads(payloads)
+            self.currentWatchMetadata = metadata
+            if let currentMetadataFileURL {
+                try saveWatchMetadata(to: currentMetadataFileURL, metadata: metadata)
+            }
+        }
     }
 
     public func refreshPendingSyncSessionCount() {
         let count = WatchPendingRecordingStore.pendingSessions().count
-        logger.info("Pending watch recording sessions: \(count)")
-
         if Thread.isMainThread {
             pendingSyncSessionCount = count
         } else {
-            DispatchQueue.main.async {
-                self.pendingSyncSessionCount = count
-            }
+            DispatchQueue.main.async { self.pendingSyncSessionCount = count }
         }
     }
 
     public func retryPendingRecordingTransfers() {
         let pendingSessions = WatchPendingRecordingStore.pendingSessions()
-        logger.info("Retrying pending transfers. sessions=\(pendingSessions.count)")
         for session in pendingSessions {
             transport.transferRecordingFiles(sessionID: session.sessionID, fileURLs: session.fileURLs)
         }
@@ -241,60 +266,42 @@ public final class WatchRecordingCoordinator: ObservableObject {
     }
 
     public func resetPendingRecordingTransferState() {
-        logger.info("Resetting pending recording transfer state")
         transport.cancelOutstandingFileTransfers()
         WatchPendingRecordingStore.resetSyncMarkers()
         refreshPendingSyncSessionCount()
-
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             self.retryPendingRecordingTransfers()
         }
     }
 
     private func startRecordingSession() async {
-        guard motionManager.isDeviceMotionAvailable else {
-            setStatus("Device motion unavailable")
-            return
-        }
-
-        if configuration.recordsAudio {
-            let hasAudioPermission = await requestAudioPermission()
-            guard hasAudioPermission else {
-                setStatus("Microphone permission denied")
-                return
-            }
-        }
-
         do {
             let sessionID = Self.makeSessionID()
-            let attitudeReferenceFrame = Self.preferredAttitudeReferenceFrame()
-            let attitudeReferenceFrameName = Self.name(for: attitudeReferenceFrame)
-            logger.info("Starting recording session \(sessionID, privacy: .public)")
-            let csvFileURL = try createRecordingFileURL(sessionID: sessionID, fileExtension: "csv")
-            let metadataFileURL = try createMetadataFileURL(sessionID: sessionID)
-            let handle = try prepareLogFile(at: csvFileURL)
-            let audioFileURL = configuration.recordsAudio ? try createRecordingFileURL(sessionID: sessionID, fileExtension: "m4a") : nil
-            let recorder = try audioFileURL.map { try prepareAudioRecorder(at: $0) }
-
-            fileHandle = handle
-            currentCSVFileURL = csvFileURL
-            currentAudioFileURL = audioFileURL
-            currentMetadataFileURL = metadataFileURL
+            let deviceMotionURL = try createAssetURL(
+                fileName: WatchRecordingAssetNaming.deviceMotionFileName(sessionID: sessionID)
+            )
+            let rawAccelerometerURL = try createAssetURL(
+                fileName: WatchRecordingAssetNaming.rawAccelerometerFileName(sessionID: sessionID)
+            )
+            let metadataURL = try createAssetURL(
+                fileName: WatchRecordingAssetNaming.metadataFileName(sessionID: sessionID)
+            )
+            deviceMotionWriter = try WatchMotionBinaryFileWriter(
+                stream: .deviceMotion,
+                fileURL: deviceMotionURL,
+                sessionID: sessionID
+            )
+            rawAccelerometerWriter = try WatchMotionBinaryFileWriter(
+                stream: .rawAccelerometer,
+                fileURL: rawAccelerometerURL,
+                sessionID: sessionID
+            )
+            currentDeviceMotionFileURL = deviceMotionURL
+            currentRawAccelerometerFileURL = rawAccelerometerURL
+            currentMetadataFileURL = metadataURL
             currentSessionID = sessionID
-            currentAttitudeReferenceFrameName = attitudeReferenceFrameName
-            audioRecorder = recorder
-
-            sampleCount = 0
-            latestAccelMagnitude = 0
-            latestGyroMagnitude = 0
-            lastFileSynchronizationUnix = Date().timeIntervalSince1970
-            recentAccelMagnitudes.removeAll(keepingCapacity: true)
-            recentGyroMagnitudes.removeAll(keepingCapacity: true)
-            isArmed = false
-            countdownSecondsRemaining = nil
-            currentFileName = csvFileURL.deletingPathExtension().lastPathComponent
-            currentWatchMetadata = nil
-            sampleTimingController = nil
+            resetPublishedSamples()
+            currentFileName = WatchRecordingAssetNaming.baseName(sessionID: sessionID)
 
             let scheduledStart = if configuration.coordinatesWithPhoneRecording {
                 await transport.requestScheduledStart(
@@ -307,140 +314,288 @@ public final class WatchRecordingCoordinator: ObservableObject {
                     accepted: true
                 )
             }
-
             let plannedStartUnix = scheduledStart?.plannedStartUnix ?? Date().timeIntervalSince1970
-            let preRollStartUnix = Date().timeIntervalSince1970
-            sampleTimingController = WatchSampleTimingController(startUnixTime: plannedStartUnix)
+            let createdUnix = Date().timeIntervalSince1970
+            timeProjector = UnixTimeProjector()
+            deviceMotionGate = ScheduledSampleGate(startUnixTime: plannedStartUnix)
+            rawAccelerometerGate = ScheduledSampleGate(startUnixTime: plannedStartUnix)
+            earliestAcceptedSampleUnix = nil
+            lastFileSynchronizationUnix = createdUnix
             currentWatchMetadata = WatchRecordingMetadata(
                 sessionID: sessionID,
                 plannedStartUnix: plannedStartUnix,
                 actualWatchStartUnix: plannedStartUnix,
-                requestedDeviceMotionInterval: configuration.requestedDeviceMotionInterval,
-                attitudeReferenceFrame: attitudeReferenceFrameName,
-                createdUnix: preRollStartUnix
+                actualDeviceMotionFrequency: 200,
+                actualRawAccelerometerFrequency: 800,
+                createdUnix: createdUnix
             )
-
-            if let recorder {
-                recorder.record(atTime: recorder.deviceCurrentTime + max(0, plannedStartUnix - preRollStartUnix))
-            }
-
-            motionManager.deviceMotionUpdateInterval = configuration.requestedDeviceMotionInterval
-            motionManager.startDeviceMotionUpdates(using: attitudeReferenceFrame, to: motionQueue) { [weak self] motion, error in
-                guard let self else { return }
-
-                if let error {
-                    DispatchQueue.main.async {
-                        self.setStatus("Motion error: \(error.localizedDescription)")
-                        self.stopRecording()
-                    }
-                    return
-                }
-
-                guard let motion else { return }
-                self.appendSample(motion)
-            }
-
             try saveCurrentWatchMetadata()
+
             isRecording = true
+            let frequencies = try startMotionCapture(sessionID: sessionID)
+            actualDeviceMotionFrequency = frequencies.deviceMotion
+            actualRawAccelerometerFrequency = frequencies.rawAccelerometer
 
             if plannedStartUnix > Date().timeIntervalSince1970 {
                 isArmed = true
                 setStatus("Armed, starting soon")
                 startCountdown(to: plannedStartUnix)
-                let delayNanoseconds = UInt64((plannedStartUnix - Date().timeIntervalSince1970) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
+                let delay = max(0, plannedStartUnix - Date().timeIntervalSince1970)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
-
+            guard isRecording, currentSessionID == sessionID else { return }
             isArmed = false
             countdownSecondsRemaining = nil
             if configuration.coordinatesWithPhoneRecording {
                 transport.sendRecordingControl(action: .start, sessionID: sessionID)
             }
-            statusMessage = configuration.recordsAudio ? "Recording motion + audio" : "Recording motion"
+            statusMessage = "Recording motion"
         } catch {
+            isRecording = false
             isArmed = false
             countdownSecondsRemaining = nil
             cleanupIncompleteSession()
-            setStatus("Failed to start: \(error.localizedDescription)")
+            setStatus(error.localizedDescription)
         }
     }
 
-    private func appendSample(_ motion: CMDeviceMotion) {
-        guard var sampleTimingController else { return }
-
-        let decision = sampleTimingController.evaluate(
-            motionTimestamp: motion.timestamp,
-            unixNow: Date().timeIntervalSince1970
-        )
-        self.sampleTimingController = sampleTimingController
-        guard decision.shouldKeepSample else { return }
-
-        let timestamp = decision.sampleUnixTime
-        if decision.isFirstAcceptedSample {
-            updateActualWatchStartUnix(timestamp)
+    private func startMotionCapture(sessionID: String) throws -> (deviceMotion: UInt16, rawAccelerometer: UInt16) {
+#if os(watchOS)
+        guard Self.isHighFrequencyRecordingSupported else {
+            throw WatchMotionCaptureError.unsupported
         }
 
-        let acceleration = motion.userAcceleration
-        let gyro = motion.rotationRate
-        let gravity = motion.gravity
-        let attitude = motion.attitude
-        let quaternion = attitude.quaternion
-        let magneticField = motion.magneticField.field
+        activeMotionSessionID = sessionID
+        let manager = CMBatchedSensorManager()
+        batchedSensorManager = manager
+        manager.startDeviceMotionUpdates { [weak self] motions, error in
+            guard let self else { return }
+            if let error {
+                self.enqueueMotionFailure(error, sessionID: sessionID)
+                return
+            }
+            guard let motions, !motions.isEmpty else { return }
+            let batch = SendableDeviceMotionBatch(
+                samples: motions,
+                callbackUnixTime: Date().timeIntervalSince1970,
+                callbackSystemUptime: ProcessInfo.processInfo.systemUptime
+            )
+            self.motionQueue.addOperation { [weak self] in
+                self?.appendDeviceMotionBatch(batch, sessionID: sessionID)
+            }
+        }
+        manager.startAccelerometerUpdates { [weak self] samples, error in
+            guard let self else { return }
+            if let error {
+                self.enqueueMotionFailure(error, sessionID: sessionID)
+                return
+            }
+            guard let samples, !samples.isEmpty else { return }
+            let batch = SendableAccelerometerBatch(
+                samples: samples,
+                callbackUnixTime: Date().timeIntervalSince1970,
+                callbackSystemUptime: ProcessInfo.processInfo.systemUptime
+            )
+            self.motionQueue.addOperation { [weak self] in
+                self?.appendAccelerometerBatch(batch, sessionID: sessionID)
+            }
+        }
 
-        let accelMagnitude = magnitude3(x: acceleration.x, y: acceleration.y, z: acceleration.z)
-        let gyroMagnitude = magnitude3(x: gyro.x, y: gyro.y, z: gyro.z)
+        let deviceFrequency = manager.deviceMotionDataFrequency
+        let rawFrequency = manager.accelerometerDataFrequency
+        guard deviceFrequency > 0 else {
+            stopMotionSources()
+            throw WatchMotionCaptureError.deviceMotionUnavailable
+        }
+        guard rawFrequency > 0 else {
+            stopMotionSources()
+            throw WatchMotionCaptureError.rawAccelerometerUnavailable
+        }
+        guard deviceFrequency == 200, rawFrequency == 800 else {
+            stopMotionSources()
+            throw WatchMotionCaptureError.unexpectedFrequency(
+                deviceMotion: deviceFrequency,
+                rawAccelerometer: rawFrequency
+            )
+        }
+        return (UInt16(deviceFrequency), UInt16(rawFrequency))
+#else
+        throw WatchMotionCaptureError.unsupported
+#endif
+    }
 
-        let line = configuration.csvFields
-            .map {
-                csvValue(
-                    for: $0,
-                    timestamp: timestamp,
-                    acceleration: acceleration,
-                    gyro: gyro,
-                    gravity: gravity,
-                    quaternion: quaternion,
-                    heading: motion.heading,
-                    magneticField: magneticField
+    private func appendDeviceMotionBatch(_ batch: SendableDeviceMotionBatch, sessionID: String) {
+        guard activeMotionSessionID == sessionID, let writer = deviceMotionWriter else { return }
+        var accelMagnitudes: [Double] = []
+        var gyroMagnitudes: [Double] = []
+        do {
+            for motion in batch.samples.sorted(by: { $0.timestamp < $1.timestamp }) {
+                guard let decision = timingDecision(
+                    timestamp: motion.timestamp,
+                    callbackUnixTime: batch.callbackUnixTime,
+                    callbackSystemUptime: batch.callbackSystemUptime,
+                    stream: .deviceMotion
+                ), decision.shouldKeepSample else { continue }
+                noteAcceptedSample(at: decision.sampleUnixTime)
+                let acceleration = motion.userAcceleration
+                let rotation = motion.rotationRate
+                let gravity = motion.gravity
+                let quaternion = motion.attitude.quaternion
+                try writer.append(
+                    WatchDeviceMotionBinaryRecord(
+                        timestampUnixMicroseconds: WatchMotionTimestamp.unixMicroseconds(from: decision.sampleUnixTime),
+                        userAccelerationX: acceleration.x,
+                        userAccelerationY: acceleration.y,
+                        userAccelerationZ: acceleration.z,
+                        rotationRateX: rotation.x,
+                        rotationRateY: rotation.y,
+                        rotationRateZ: rotation.z,
+                        gravityX: gravity.x,
+                        gravityY: gravity.y,
+                        gravityZ: gravity.z,
+                        quaternionW: quaternion.w,
+                        quaternionX: quaternion.x,
+                        quaternionY: quaternion.y,
+                        quaternionZ: quaternion.z
+                    )
+                )
+                accelMagnitudes.append(magnitude3(x: acceleration.x, y: acceleration.y, z: acceleration.z))
+                gyroMagnitudes.append(magnitude3(x: rotation.x, y: rotation.y, z: rotation.z))
+            }
+            try synchronizeIfNeeded()
+        } catch {
+            failMotionCapture(error, sessionID: sessionID)
+            return
+        }
+        guard !accelMagnitudes.isEmpty else { return }
+        let count = Int(writer.sampleCount)
+        DispatchQueue.main.async {
+            guard self.isRecording, self.currentSessionID == sessionID else { return }
+            self.sampleCount = count
+            self.latestAccelMagnitude = accelMagnitudes.last ?? 0
+            self.latestGyroMagnitude = gyroMagnitudes.last ?? 0
+            self.recentAccelMagnitudes.append(contentsOf: accelMagnitudes)
+            self.recentGyroMagnitudes.append(contentsOf: gyroMagnitudes)
+            self.trimHistory()
+        }
+    }
+
+    private func appendAccelerometerBatch(_ batch: SendableAccelerometerBatch, sessionID: String) {
+        guard activeMotionSessionID == sessionID, let writer = rawAccelerometerWriter else { return }
+        do {
+            for sample in batch.samples.sorted(by: { $0.timestamp < $1.timestamp }) {
+                guard let decision = timingDecision(
+                    timestamp: sample.timestamp,
+                    callbackUnixTime: batch.callbackUnixTime,
+                    callbackSystemUptime: batch.callbackSystemUptime,
+                    stream: .rawAccelerometer
+                ), decision.shouldKeepSample else { continue }
+                noteAcceptedSample(at: decision.sampleUnixTime)
+                try writer.append(
+                    WatchRawAccelerometerBinaryRecord(
+                        timestampUnixMicroseconds: WatchMotionTimestamp.unixMicroseconds(from: decision.sampleUnixTime),
+                        rawAccelerationX: sample.acceleration.x,
+                        rawAccelerationY: sample.acceleration.y,
+                        rawAccelerationZ: sample.acceleration.z
+                    )
                 )
             }
-            .joined(separator: ",")
-            .appending("\n")
-
-        let handle = fileHandle
-
-        fileQueue.async {
-            guard let bytes = line.data(using: .utf8) else { return }
-
-            do {
-                try handle?.seekToEnd()
-                try handle?.write(contentsOf: bytes)
-
-                let now = Date().timeIntervalSince1970
-                if now - self.lastFileSynchronizationUnix >= self.configuration.fileSynchronizationInterval {
-                    try handle?.synchronize()
-                    self.lastFileSynchronizationUnix = now
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setStatus("Write error: \(error.localizedDescription)")
-                }
-            }
+            try synchronizeIfNeeded()
+        } catch {
+            failMotionCapture(error, sessionID: sessionID)
         }
+    }
 
+    private func timingDecision(
+        timestamp: TimeInterval,
+        callbackUnixTime: Double,
+        callbackSystemUptime: TimeInterval,
+        stream: WatchMotionBinaryStream
+    ) -> SampleGateDecision? {
+        guard var projector = timeProjector else { return nil }
+        let sampleUnixTime = projector.project(
+            motionTimestamp: timestamp,
+            unixNow: callbackUnixTime,
+            systemUptimeNow: callbackSystemUptime
+        )
+        timeProjector = projector
+
+        switch stream {
+        case .deviceMotion:
+            guard var gate = deviceMotionGate else { return nil }
+            let decision = gate.evaluate(sampleUnixTime: sampleUnixTime)
+            deviceMotionGate = gate
+            return decision
+        case .rawAccelerometer:
+            guard var gate = rawAccelerometerGate else { return nil }
+            let decision = gate.evaluate(sampleUnixTime: sampleUnixTime)
+            rawAccelerometerGate = gate
+            return decision
+        }
+    }
+
+    private func noteAcceptedSample(at unixTime: Double) {
+        earliestAcceptedSampleUnix = min(earliestAcceptedSampleUnix ?? unixTime, unixTime)
+    }
+
+    private func synchronizeIfNeeded() throws {
+        let now = Date().timeIntervalSince1970
+        guard now - lastFileSynchronizationUnix >= configuration.fileSynchronizationInterval else { return }
+        try deviceMotionWriter?.synchronize()
+        try rawAccelerometerWriter?.synchronize()
+        lastFileSynchronizationUnix = now
+    }
+
+    private func enqueueMotionFailure(_ error: Error, sessionID: String) {
+        motionQueue.addOperation { [weak self] in
+            self?.failMotionCapture(error, sessionID: sessionID)
+        }
+    }
+
+    private func failMotionCapture(_ error: Error, sessionID: String) {
+        guard activeMotionSessionID == sessionID else { return }
+        activeMotionSessionID = nil
         DispatchQueue.main.async {
-            self.latestAccelMagnitude = accelMagnitude
-            self.latestGyroMagnitude = gyroMagnitude
-            self.sampleCount += 1
-
-            self.recentAccelMagnitudes.append(accelMagnitude)
-            self.recentGyroMagnitudes.append(gyroMagnitude)
-
-            if self.recentAccelMagnitudes.count > self.configuration.maxHistorySamples {
-                self.recentAccelMagnitudes.removeFirst(self.recentAccelMagnitudes.count - self.configuration.maxHistorySamples)
+            guard self.isRecording, self.currentSessionID == sessionID else { return }
+            if self.configuration.coordinatesWithPhoneRecording {
+                self.transport.sendRecordingControl(action: .stop, sessionID: sessionID)
             }
-            if self.recentGyroMagnitudes.count > self.configuration.maxHistorySamples {
-                self.recentGyroMagnitudes.removeFirst(self.recentGyroMagnitudes.count - self.configuration.maxHistorySamples)
-            }
+            self.isRecording = false
+            self.cleanupIncompleteSession()
+            self.setStatus("Motion error: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopMotionCaptureAndDrain() {
+        stopMotionSources()
+        motionQueue.waitUntilAllOperationsAreFinished()
+        activeMotionSessionID = nil
+    }
+
+    private func stopMotionSources() {
+#if os(watchOS)
+        batchedSensorManager?.stopDeviceMotionUpdates()
+        batchedSensorManager?.stopAccelerometerUpdates()
+        batchedSensorManager = nil
+#endif
+    }
+
+    private func resetPublishedSamples() {
+        sampleCount = 0
+        latestAccelMagnitude = 0
+        latestGyroMagnitude = 0
+        recentAccelMagnitudes.removeAll(keepingCapacity: true)
+        recentGyroMagnitudes.removeAll(keepingCapacity: true)
+        isArmed = false
+        countdownSecondsRemaining = nil
+    }
+
+    private func trimHistory() {
+        if recentAccelMagnitudes.count > configuration.maxHistorySamples {
+            recentAccelMagnitudes.removeFirst(recentAccelMagnitudes.count - configuration.maxHistorySamples)
+        }
+        if recentGyroMagnitudes.count > configuration.maxHistorySamples {
+            recentGyroMagnitudes.removeFirst(recentGyroMagnitudes.count - configuration.maxHistorySamples)
         }
     }
 
@@ -448,241 +603,78 @@ public final class WatchRecordingCoordinator: ObservableObject {
         sqrt((x * x) + (y * y) + (z * z))
     }
 
-    private func csvValue(
-        for field: WatchRecordingCSVField,
-        timestamp: Double,
-        acceleration: CMAcceleration,
-        gyro: CMRotationRate,
-        gravity: CMAcceleration,
-        quaternion: CMQuaternion,
-        heading: Double,
-        magneticField: CMMagneticField
-    ) -> String {
-        switch field {
-        case .timestamp:
-            return formatCSVValue(timestamp, fractionDigits: 6)
-        case .ax:
-            return formatCSVValue(acceleration.x, fractionDigits: 6)
-        case .ay:
-            return formatCSVValue(acceleration.y, fractionDigits: 6)
-        case .az:
-            return formatCSVValue(acceleration.z, fractionDigits: 6)
-        case .gx:
-            return formatCSVValue(gyro.x, fractionDigits: 6)
-        case .gy:
-            return formatCSVValue(gyro.y, fractionDigits: 6)
-        case .gz:
-            return formatCSVValue(gyro.z, fractionDigits: 6)
-        case .grx:
-            return formatCSVValue(gravity.x, fractionDigits: 6)
-        case .gry:
-            return formatCSVValue(gravity.y, fractionDigits: 6)
-        case .grz:
-            return formatCSVValue(gravity.z, fractionDigits: 6)
-        case .qw:
-            return formatCSVValue(quaternion.w, fractionDigits: 9)
-        case .qx:
-            return formatCSVValue(quaternion.x, fractionDigits: 9)
-        case .qy:
-            return formatCSVValue(quaternion.y, fractionDigits: 9)
-        case .qz:
-            return formatCSVValue(quaternion.z, fractionDigits: 9)
-        case .heading:
-            return formatCSVValue(heading, fractionDigits: 9)
-        case .mX:
-            return formatCSVValue(magneticField.x, fractionDigits: 9)
-        case .mY:
-            return formatCSVValue(magneticField.y, fractionDigits: 9)
-        case .mZ:
-            return formatCSVValue(magneticField.z, fractionDigits: 9)
-        }
-    }
-
-    private func formatCSVValue(_ value: Double, fractionDigits: Int) -> String {
-        String(
-            format: "%.\(fractionDigits)f",
-            locale: Locale(identifier: "en_US_POSIX"),
-            value
-        )
-    }
-
-    private func requestAudioPermission() async -> Bool {
-        let application = AVAudioApplication.shared
-
-        switch application.recordPermission {
-        case .granted:
-            return true
-        case .undetermined:
-            return await withCheckedContinuation { continuation in
-                AVAudioApplication.requestRecordPermission { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        case .denied:
-            return false
-        @unknown default:
-            return false
-        }
-    }
-
-    private func createRecordingFileURL(sessionID: String, fileExtension: String) throws -> URL {
-        let documentsDirectory = WatchPendingRecordingStore.recordingsDirectoryURL()
-        try FileManager.default.createDirectory(at: documentsDirectory, withIntermediateDirectories: true)
-
-        return documentsDirectory.appendingPathComponent("recording_\(sessionID).\(fileExtension)")
-    }
-
-    private func createMetadataFileURL(sessionID: String) throws -> URL {
-        let documentsDirectory = WatchPendingRecordingStore.recordingsDirectoryURL()
-        try FileManager.default.createDirectory(at: documentsDirectory, withIntermediateDirectories: true)
-
-        return documentsDirectory.appendingPathComponent("recording_\(sessionID).watch.json")
-    }
-
-    private func prepareLogFile(at url: URL) throws -> FileHandle {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        let header = configuration.csvFields
-            .map(\.rawValue)
-            .joined(separator: ",")
-            .appending("\n")
-        try header.write(to: url, atomically: true, encoding: .utf8)
-        return try FileHandle(forWritingTo: url)
-    }
-
-    private func prepareAudioRecorder(at url: URL) throws -> AVAudioRecorder {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default)
-        try session.setActive(true)
-
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        recorder.prepareToRecord()
-        return recorder
+    private func createAssetURL(fileName: String) throws -> URL {
+        let directory = WatchPendingRecordingStore.recordingsDirectoryURL()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent(fileName)
     }
 
     private func saveWatchMetadata(to url: URL, metadata: WatchRecordingMetadata) throws {
-        let data = try JSONEncoder().encode(metadata)
-        try data.write(to: url, options: .atomic)
+        try JSONEncoder().encode(metadata).write(to: url, options: .atomic)
     }
 
     private func saveCurrentWatchMetadata() throws {
-        guard let currentMetadataFileURL, let currentWatchMetadata else { return }
-        try saveWatchMetadata(to: currentMetadataFileURL, metadata: currentWatchMetadata)
+        try withMetadataLock {
+            guard let currentMetadataFileURL, let currentWatchMetadata else { return }
+            try saveWatchMetadata(to: currentMetadataFileURL, metadata: currentWatchMetadata)
+        }
     }
 
-    private func updateActualWatchStartUnix(_ actualWatchStartUnix: Double) {
-        guard let currentWatchMetadata else { return }
-
-        self.currentWatchMetadata = WatchRecordingMetadata(
-            sessionID: currentWatchMetadata.sessionID,
-            plannedStartUnix: currentWatchMetadata.plannedStartUnix,
-            actualWatchStartUnix: actualWatchStartUnix,
-            requestedDeviceMotionInterval: currentWatchMetadata.requestedDeviceMotionInterval,
-            attitudeReferenceFrame: currentWatchMetadata.attitudeReferenceFrame,
-            createdUnix: currentWatchMetadata.createdUnix,
-            applicationPayloads: currentWatchMetadata.applicationPayloads
-        )
-
-        do {
-            try saveCurrentWatchMetadata()
-        } catch {
-            setStatus("Metadata write error: \(error.localizedDescription)")
-        }
+    private func withMetadataLock<T>(_ body: () throws -> T) rethrows -> T {
+        metadataLock.lock()
+        defer { metadataLock.unlock() }
+        return try body()
     }
 
     private func startCountdown(to plannedStartUnix: Double) {
         Task { [weak self] in
             guard let self else { return }
-
             while self.isArmed {
                 let remaining = max(0, plannedStartUnix - Date().timeIntervalSince1970)
-
-                await MainActor.run {
-                    self.countdownSecondsRemaining = remaining
-                }
-
-                if remaining <= 0.05 {
-                    break
-                }
-
+                await MainActor.run { self.countdownSecondsRemaining = remaining }
+                if remaining <= 0.05 { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-
             await MainActor.run {
-                if self.isArmed {
-                    self.countdownSecondsRemaining = 0
-                }
+                if self.isArmed { self.countdownSecondsRemaining = 0 }
             }
         }
     }
 
     private func cleanupIncompleteSession() {
-        let fileManager = FileManager.default
-
-        if let currentCSVFileURL {
-            try? fileManager.removeItem(at: currentCSVFileURL)
+        stopMotionCaptureAndDrain()
+        deviceMotionWriter = nil
+        rawAccelerometerWriter = nil
+        for url in [
+            currentDeviceMotionFileURL,
+            currentRawAccelerometerFileURL,
+            currentMetadataFileURL,
+        ].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url)
         }
-        if let currentAudioFileURL {
-            try? fileManager.removeItem(at: currentAudioFileURL)
-        }
-
-        currentCSVFileURL = nil
-        currentAudioFileURL = nil
+        isRecording = false
+        isArmed = false
+        countdownSecondsRemaining = nil
+        currentDeviceMotionFileURL = nil
+        currentRawAccelerometerFileURL = nil
         currentMetadataFileURL = nil
         currentSessionID = nil
-        currentAttitudeReferenceFrameName = nil
-        audioRecorder = nil
         currentWatchMetadata = nil
-        fileHandle = nil
-        sampleTimingController = nil
-    }
-
-    private static func preferredAttitudeReferenceFrame() -> CMAttitudeReferenceFrame {
-        let availableFrames = CMMotionManager.availableAttitudeReferenceFrames()
-
-        if availableFrames.contains(.xMagneticNorthZVertical) {
-            return .xMagneticNorthZVertical
-        }
-        if availableFrames.contains(.xArbitraryCorrectedZVertical) {
-            return .xArbitraryCorrectedZVertical
-        }
-        return .xArbitraryZVertical
-    }
-
-    private static func name(for frame: CMAttitudeReferenceFrame) -> String {
-        switch frame {
-        case .xArbitraryZVertical:
-            return "xArbitraryZVertical"
-        case .xArbitraryCorrectedZVertical:
-            return "xArbitraryCorrectedZVertical"
-        case .xMagneticNorthZVertical:
-            return "xMagneticNorthZVertical"
-        case .xTrueNorthZVertical:
-            return "xTrueNorthZVertical"
-        default:
-            return "unknown"
-        }
+        timeProjector = nil
+        deviceMotionGate = nil
+        rawAccelerometerGate = nil
+        earliestAcceptedSampleUnix = nil
     }
 
     private static func makeSessionID() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        return formatter.string(from: Date())
+        UUID().uuidString.lowercased()
     }
 
     private func setStatus(_ message: String) {
         if Thread.isMainThread {
             statusMessage = message
         } else {
-            DispatchQueue.main.async {
-                self.statusMessage = message
-            }
+            DispatchQueue.main.async { self.statusMessage = message }
         }
     }
 }
