@@ -270,13 +270,13 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
             deviceMotionSHA256: deviceMotion?.sha256 ?? deviceMotionSHA256,
             deviceMotionFormatVersion: deviceMotion?.formatVersion ?? deviceMotionFormatVersion,
             deviceMotionSampleCount: deviceMotion?.sampleCount ?? deviceMotionSampleCount,
-            deviceMotionSaturationCount: deviceMotion?.saturationCount ?? deviceMotionSaturationCount,
+            deviceMotionSaturationCount: deviceMotionSaturationCount,
             rawAccelerometerFileName: rawAccelerometer?.fileName ?? rawAccelerometerFileName,
             rawAccelerometerByteCount: rawAccelerometer?.byteCount ?? rawAccelerometerByteCount,
             rawAccelerometerSHA256: rawAccelerometer?.sha256 ?? rawAccelerometerSHA256,
             rawAccelerometerFormatVersion: rawAccelerometer?.formatVersion ?? rawAccelerometerFormatVersion,
             rawAccelerometerSampleCount: rawAccelerometer?.sampleCount ?? rawAccelerometerSampleCount,
-            rawAccelerometerSaturationCount: rawAccelerometer?.saturationCount ?? rawAccelerometerSaturationCount,
+            rawAccelerometerSaturationCount: rawAccelerometerSaturationCount,
             applicationPayloads: applicationPayloads ?? self.applicationPayloads
         )
     }

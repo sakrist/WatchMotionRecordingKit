@@ -4,8 +4,8 @@ import Foundation
 public enum WatchMotionBinaryContract {
     public static let headerByteCount = 64
     public static let formatVersion: UInt16 = 1
-    public static let deviceMotionRecordByteCount = 34
-    public static let rawAccelerometerRecordByteCount = 14
+    public static let deviceMotionRecordByteCount = 60
+    public static let rawAccelerometerRecordByteCount = 20
     public static let sessionIDByteCount = 16
 }
 
@@ -86,35 +86,6 @@ public enum WatchMotionBinaryStream: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    public var scaleCount: UInt16 {
-        switch self {
-        case .deviceMotion:
-            return 4
-        case .rawAccelerometer:
-            return 1
-        }
-    }
-
-    /// Four on-disk Float32 scale slots in physical units per stored count.
-    public var quantizationScales: [Float] {
-        switch self {
-        case .deviceMotion:
-            return [
-                Float(64.0 / 32_767.0),
-                Float(64.0 / 32_767.0),
-                Float(1.0 / 32_767.0),
-                Float(1.0 / 32_767.0),
-            ]
-        case .rawAccelerometer:
-            return [
-                Float(256.0 / 32_767.0),
-                0,
-                0,
-                0,
-            ]
-        }
-    }
-
     public var fileSuffix: String {
         switch self {
         case .deviceMotion:
@@ -133,15 +104,10 @@ public enum WatchMotionBinaryError: Error, Equatable, LocalizedError {
     case invalidSessionID
     case sessionMismatch(expected: String, actual: String)
     case invalidFrequency(UInt16)
-    case invalidScaleCount(expected: UInt16, actual: UInt16)
-    case invalidScale(index: Int)
-    case invalidSaturationCount(UInt64)
     case invalidFileLength(Int)
     case sampleCountMismatch(expected: UInt64, actual: UInt64)
     case invalidRecordLength(expected: Int, actual: Int)
-    case invalidQuantizationScale
     case nonFiniteValue
-    case reservedQuantizedValue
     case nonMonotonicTimestamp(previous: Int64, next: Int64)
     case writerFinalized
 
@@ -161,24 +127,14 @@ public enum WatchMotionBinaryError: Error, Equatable, LocalizedError {
             return "Binary session identifier \(actual) does not match \(expected)"
         case .invalidFrequency(let frequency):
             return "Invalid motion frequency: \(frequency) Hz"
-        case .invalidScaleCount(let expected, let actual):
-            return "Invalid quantization scale count \(actual); expected \(expected)"
-        case .invalidScale(let index):
-            return "Invalid quantization scale at index \(index)"
-        case .invalidSaturationCount(let count):
-            return "Invalid saturation count: \(count)"
         case .invalidFileLength(let length):
             return "Invalid motion binary file length: \(length)"
         case .sampleCountMismatch(let expected, let actual):
             return "Binary sample count \(actual) does not match header count \(expected)"
         case .invalidRecordLength(let expected, let actual):
             return "Invalid motion record length \(actual); expected \(expected)"
-        case .invalidQuantizationScale:
-            return "Quantization scale must be finite and positive"
         case .nonFiniteValue:
             return "Motion value is not finite"
-        case .reservedQuantizedValue:
-            return "Motion record contains the reserved Int16 minimum value"
         case .nonMonotonicTimestamp(let previous, let next):
             return "Motion timestamp regressed from \(previous) to \(next)"
         case .writerFinalized:
@@ -194,16 +150,12 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
     public let sampleCount: UInt64
     public let sessionID: String
     public let actualFrequencyHz: UInt16
-    public let scaleCount: UInt16
-    public let quantizationScales: [Float]
-    public let saturationCount: UInt64
 
     public init(
         stream: WatchMotionBinaryStream,
         sampleCount: UInt64,
         sessionID: String,
         actualFrequencyHz: UInt16,
-        saturationCount: UInt64,
         formatVersion: UInt16 = WatchMotionBinaryContract.formatVersion
     ) {
         self.stream = stream
@@ -212,9 +164,6 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         self.sampleCount = sampleCount
         self.sessionID = Self.canonicalSessionID(sessionID)
         self.actualFrequencyHz = actualFrequencyHz
-        self.scaleCount = stream.scaleCount
-        self.quantizationScales = stream.quantizationScales
-        self.saturationCount = saturationCount
     }
 
     public func encoded() throws -> Data {
@@ -228,11 +177,7 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         data.appendLittleEndian(sampleCount)
         data.append(sessionBytes)
         data.appendLittleEndian(actualFrequencyHz)
-        data.appendLittleEndian(scaleCount)
-        for scale in quantizationScales {
-            data.appendLittleEndian(scale.bitPattern)
-        }
-        data.appendLittleEndian(saturationCount)
+        data.append(Data(count: 26))
 
         guard data.count == WatchMotionBinaryContract.headerByteCount else {
             throw WatchMotionBinaryError.invalidHeaderLength(data.count)
@@ -259,9 +204,7 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         let sampleCount = try reader.readUInt64()
         let sessionData = try reader.readData(count: WatchMotionBinaryContract.sessionIDByteCount)
         let actualFrequencyHz = try reader.readUInt16()
-        let scaleCount = try reader.readUInt16()
-        let quantizationScales = try (0..<4).map { _ in Float(bitPattern: try reader.readUInt32()) }
-        let saturationCount = try reader.readUInt64()
+        let _ = try reader.readData(count: 26) // reserved
 
         let sessionID = try decodeSessionIdentifier(sessionData, formatVersion: formatVersion)
 
@@ -271,16 +214,12 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
             recordSize: recordSize,
             sampleCount: sampleCount,
             sessionID: sessionID,
-            actualFrequencyHz: actualFrequencyHz,
-            scaleCount: scaleCount,
-            quantizationScales: quantizationScales,
-            saturationCount: saturationCount
+            actualFrequencyHz: actualFrequencyHz
         )
         try header.validateContract(expectedStream: expectedStream, expectedSessionID: expectedSessionID)
         return header
     }
 
-    /// Validates the tail shape and header count, returning the file-derived record count.
     @discardableResult
     public func validateFileByteCount(_ byteCount: Int) throws -> UInt64 {
         guard byteCount >= WatchMotionBinaryContract.headerByteCount else {
@@ -303,10 +242,7 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         recordSize: UInt16,
         sampleCount: UInt64,
         sessionID: String,
-        actualFrequencyHz: UInt16,
-        scaleCount: UInt16,
-        quantizationScales: [Float],
-        saturationCount: UInt64
+        actualFrequencyHz: UInt16
     ) {
         self.stream = stream
         self.formatVersion = formatVersion
@@ -314,9 +250,6 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         self.sampleCount = sampleCount
         self.sessionID = sessionID
         self.actualFrequencyHz = actualFrequencyHz
-        self.scaleCount = scaleCount
-        self.quantizationScales = quantizationScales
-        self.saturationCount = saturationCount
     }
 
     private func validateContract(
@@ -334,21 +267,6 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
         }
         guard actualFrequencyHz > 0 else {
             throw WatchMotionBinaryError.invalidFrequency(actualFrequencyHz)
-        }
-        guard scaleCount == stream.scaleCount else {
-            throw WatchMotionBinaryError.invalidScaleCount(expected: stream.scaleCount, actual: scaleCount)
-        }
-        guard quantizationScales.count == 4 else {
-            throw WatchMotionBinaryError.invalidScale(index: quantizationScales.count)
-        }
-        for (index, pair) in zip(quantizationScales, stream.quantizationScales).enumerated() {
-            guard pair.0.bitPattern == pair.1.bitPattern else {
-                throw WatchMotionBinaryError.invalidScale(index: index)
-            }
-        }
-        let maximumSaturations = sampleCount.multipliedReportingOverflow(by: stream.componentCount)
-        guard !maximumSaturations.overflow, saturationCount <= maximumSaturations.partialValue else {
-            throw WatchMotionBinaryError.invalidSaturationCount(saturationCount)
         }
         _ = try encodedSessionIdentifier()
         if let expectedSessionID, !sessionIDsMatch(sessionID, expectedSessionID) {
@@ -399,42 +317,8 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
     }
 }
 
-public struct WatchMotionQuantizedValue: Sendable, Equatable {
-    public let value: Int16
-    public let saturated: Bool
-}
-
-public enum WatchMotionQuantizer {
-    public static func quantize(_ value: Double, scale: Float) throws -> WatchMotionQuantizedValue {
-        guard value.isFinite else {
-            throw WatchMotionBinaryError.nonFiniteValue
-        }
-        guard scale.isFinite, scale > 0 else {
-            throw WatchMotionBinaryError.invalidQuantizationScale
-        }
-
-        let rounded = (value / Double(scale)).rounded()
-        let clamped = min(32_767.0, max(-32_767.0, rounded))
-        return WatchMotionQuantizedValue(
-            value: Int16(clamped),
-            saturated: rounded != clamped
-        )
-    }
-
-    public static func dequantize(_ value: Int16, scale: Float) throws -> Double {
-        guard value != .min else {
-            throw WatchMotionBinaryError.reservedQuantizedValue
-        }
-        guard scale.isFinite, scale > 0 else {
-            throw WatchMotionBinaryError.invalidQuantizationScale
-        }
-        return Double(value) * Double(scale)
-    }
-}
-
 public struct WatchMotionEncodedRecord: Sendable, Equatable {
     public let data: Data
-    public let saturationCount: UInt64
 }
 
 public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
@@ -486,25 +370,18 @@ public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
     }
 
     public func encoded() throws -> WatchMotionEncodedRecord {
-        let scales = WatchMotionBinaryStream.deviceMotion.quantizationScales
-        let groups: [([Double], Float)] = [
-            ([userAccelerationX, userAccelerationY, userAccelerationZ], scales[0]),
-            ([rotationRateX, rotationRateY, rotationRateZ], scales[1]),
-            ([gravityX, gravityY, gravityZ], scales[2]),
-            ([quaternionW, quaternionX, quaternionY, quaternionZ], scales[3]),
-        ]
-
         var data = Data(capacity: WatchMotionBinaryContract.deviceMotionRecordByteCount)
         data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
-        var saturationCount: UInt64 = 0
-        for (values, scale) in groups {
-            for value in values {
-                let quantized = try WatchMotionQuantizer.quantize(value, scale: scale)
-                data.appendLittleEndian(UInt16(bitPattern: quantized.value))
-                saturationCount += quantized.saturated ? 1 : 0
-            }
+        for value in [
+            userAccelerationX, userAccelerationY, userAccelerationZ,
+            rotationRateX, rotationRateY, rotationRateZ,
+            gravityX, gravityY, gravityZ,
+            quaternionW, quaternionX, quaternionY, quaternionZ,
+        ] {
+            guard value.isFinite else { throw WatchMotionBinaryError.nonFiniteValue }
+            data.appendLittleEndian(Float32(value))
         }
-        return WatchMotionEncodedRecord(data: data, saturationCount: saturationCount)
+        return WatchMotionEncodedRecord(data: data)
     }
 
     public static func decode(from data: Data) throws -> Self {
@@ -516,15 +393,10 @@ public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
         }
         var reader = LittleEndianDataReader(data: data)
         let timestamp = Int64(bitPattern: try reader.readUInt64())
-        let scales = WatchMotionBinaryStream.deviceMotion.quantizationScales
         var values: [Double] = []
         values.reserveCapacity(13)
-        for scale in [scales[0], scales[0], scales[0],
-                      scales[1], scales[1], scales[1],
-                      scales[2], scales[2], scales[2],
-                      scales[3], scales[3], scales[3], scales[3]] {
-            let stored = Int16(bitPattern: try reader.readUInt16())
-            values.append(try WatchMotionQuantizer.dequantize(stored, scale: scale))
+        for _ in 0..<13 {
+            values.append(Double(Float32(bitPattern: try reader.readUInt32())))
         }
         return Self(
             timestampUnixMicroseconds: timestamp,
@@ -555,16 +427,13 @@ public struct WatchRawAccelerometerBinaryRecord: Sendable, Equatable {
     }
 
     public func encoded() throws -> WatchMotionEncodedRecord {
-        let scale = WatchMotionBinaryStream.rawAccelerometer.quantizationScales[0]
         var data = Data(capacity: WatchMotionBinaryContract.rawAccelerometerRecordByteCount)
         data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
-        var saturationCount: UInt64 = 0
         for value in [rawAccelerationX, rawAccelerationY, rawAccelerationZ] {
-            let quantized = try WatchMotionQuantizer.quantize(value, scale: scale)
-            data.appendLittleEndian(UInt16(bitPattern: quantized.value))
-            saturationCount += quantized.saturated ? 1 : 0
+            guard value.isFinite else { throw WatchMotionBinaryError.nonFiniteValue }
+            data.appendLittleEndian(Float32(value))
         }
-        return WatchMotionEncodedRecord(data: data, saturationCount: saturationCount)
+        return WatchMotionEncodedRecord(data: data)
     }
 
     public static func decode(from data: Data) throws -> Self {
@@ -576,10 +445,9 @@ public struct WatchRawAccelerometerBinaryRecord: Sendable, Equatable {
         }
         var reader = LittleEndianDataReader(data: data)
         let timestamp = Int64(bitPattern: try reader.readUInt64())
-        let scale = WatchMotionBinaryStream.rawAccelerometer.quantizationScales[0]
-        let x = try WatchMotionQuantizer.dequantize(Int16(bitPattern: reader.readUInt16()), scale: scale)
-        let y = try WatchMotionQuantizer.dequantize(Int16(bitPattern: reader.readUInt16()), scale: scale)
-        let z = try WatchMotionQuantizer.dequantize(Int16(bitPattern: reader.readUInt16()), scale: scale)
+        let x = Double(Float32(bitPattern: try reader.readUInt32()))
+        let y = Double(Float32(bitPattern: try reader.readUInt32()))
+        let z = Double(Float32(bitPattern: try reader.readUInt32()))
         return Self(
             timestampUnixMicroseconds: timestamp,
             rawAccelerationX: x,
@@ -596,7 +464,6 @@ public struct WatchMotionBinaryFileSummary: Sendable, Equatable {
     public let sha256: String
     public let formatVersion: UInt16
     public let sampleCount: UInt64
-    public let saturationCount: UInt64
     public let actualFrequencyHz: UInt16
 }
 
@@ -605,7 +472,6 @@ public final class WatchMotionBinaryFileWriter {
     public let fileURL: URL
     public let sessionID: String
     public private(set) var sampleCount: UInt64 = 0
-    public private(set) var saturationCount: UInt64 = 0
 
     private var handle: FileHandle?
     private var lastTimestamp: Int64?
@@ -628,9 +494,7 @@ public final class WatchMotionBinaryFileWriter {
             stream: stream,
             sampleCount: 0,
             sessionID: sessionID,
-            actualFrequencyHz: initialFrequencyHz ?? stream.nominalFrequencyHz,
-            saturationCount: 0,
-            formatVersion: WatchMotionBinaryContract.formatVersion
+            actualFrequencyHz: initialFrequencyHz ?? stream.nominalFrequencyHz
         )
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: fileURL.path) {
@@ -668,9 +532,7 @@ public final class WatchMotionBinaryFileWriter {
             stream: stream,
             sampleCount: sampleCount,
             sessionID: sessionID,
-            actualFrequencyHz: actualFrequencyHz,
-            saturationCount: saturationCount,
-            formatVersion: WatchMotionBinaryContract.formatVersion
+            actualFrequencyHz: actualFrequencyHz
         )
         try handle.seek(toOffset: 0)
         try handle.write(contentsOf: header.encoded())
@@ -687,7 +549,6 @@ public final class WatchMotionBinaryFileWriter {
             sha256: try WatchMotionFileIntegrity.sha256Hex(for: fileURL),
             formatVersion: header.formatVersion,
             sampleCount: sampleCount,
-            saturationCount: saturationCount,
             actualFrequencyHz: actualFrequencyHz
         )
     }
@@ -700,7 +561,6 @@ public final class WatchMotionBinaryFileWriter {
         try handle.write(contentsOf: encoded.data)
         lastTimestamp = timestamp
         sampleCount += 1
-        saturationCount += encoded.saturationCount
     }
 }
 
@@ -750,41 +610,32 @@ private struct LittleEndianDataReader {
     }
 
     mutating func readUInt16() throws -> UInt16 {
-        let bytes = try readData(count: 2)
-        return UInt16(bytes[bytes.startIndex])
-            | (UInt16(bytes[bytes.index(after: bytes.startIndex)]) << 8)
+        try readLittleEndian() as UInt16
     }
 
     mutating func readUInt32() throws -> UInt32 {
-        let bytes = try readData(count: 4)
-        return bytes.enumerated().reduce(0) { result, pair in
-            result | (UInt32(pair.element) << UInt32(pair.offset * 8))
-        }
+        try readLittleEndian() as UInt32
     }
 
     mutating func readUInt64() throws -> UInt64 {
-        let bytes = try readData(count: 8)
-        return bytes.enumerated().reduce(0) { result, pair in
-            result | (UInt64(pair.element) << UInt64(pair.offset * 8))
+        try readLittleEndian() as UInt64
+    }
+
+    private mutating func readLittleEndian<T: FixedWidthInteger>() throws -> T {
+        let bytes = try readData(count: MemoryLayout<T>.size)
+        return bytes.withUnsafeBytes { raw in
+            T(littleEndian: raw.load(as: T.self))
         }
     }
 }
 
 private extension Data {
-    mutating func appendLittleEndian(_ value: UInt16) {
-        append(UInt8(truncatingIfNeeded: value))
-        append(UInt8(truncatingIfNeeded: value >> 8))
+    mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
-    mutating func appendLittleEndian(_ value: UInt32) {
-        for shift in stride(from: 0, to: 32, by: 8) {
-            append(UInt8(truncatingIfNeeded: value >> UInt32(shift)))
-        }
-    }
-
-    mutating func appendLittleEndian(_ value: UInt64) {
-        for shift in stride(from: 0, to: 64, by: 8) {
-            append(UInt8(truncatingIfNeeded: value >> UInt64(shift)))
-        }
+    mutating func appendLittleEndian(_ value: Float32) {
+        appendLittleEndian(value.bitPattern)
     }
 }

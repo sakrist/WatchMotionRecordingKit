@@ -8,7 +8,7 @@ Reusable Apple Watch motion-recording primitives.
 - Shared phone and Watch metadata contracts
 - Automatic native batched capture at 200 Hz device motion and 800 Hz raw acceleration
 - Shared uptime-to-Unix timestamp projection with scheduled-start gating
-- Versioned fixed-record binary codecs, quantization, integrity hashes, and writers
+- Versioned fixed-record binary codecs, integrity hashes, and writers
 - WatchConnectivity transfer and retained pending-session coordination
 
 ## Capture Contract
@@ -23,23 +23,55 @@ recording_<session-id>.raw-accelerometer.bin
 recording_<session-id>.watch.json
 ```
 
-Both sensor files have explicit 64-byte little-endian version-1 headers. The Watch generates one UUID per recording, uses its lowercase string form for asset names and metadata, and encodes its native 16 bytes in both headers. Device-motion records are 34 bytes and contain projected Unix microseconds, user acceleration, rotation rate, gravity, and quaternion. Raw-accelerometer records are 14 bytes and contain projected Unix microseconds plus acceleration including gravity. The streams retain their independent timestamps and are never assumed to be row-aligned. Timestamp-based development identifiers are intentionally unsupported.
+Both sensor files have explicit 64-byte little-endian headers. The Watch generates one UUID per recording, uses its lowercase string form for asset names and metadata, and encodes its native 16 bytes in both headers. Device-motion records are 60 bytes and contain a Unix-microsecond timestamp, user acceleration, rotation rate, gravity, and quaternion as Float32 values. Raw-accelerometer records are 20 bytes and contain a timestamp plus three acceleration components as Float32 values. The streams retain their independent timestamps and are never assumed to be row-aligned.
 
-The metadata sidecar names both files and records their finalized byte sizes, SHA-256 hashes, format versions, actual frequencies, sample counts, and saturation counts. `applicationPayloads` remains available for app-owned sidecar data such as strike ratings.
+The metadata sidecar names both files and records their finalized byte sizes, SHA-256 hashes, format versions, actual frequencies, and sample counts. `applicationPayloads` remains available for app-owned sidecar data such as strike ratings.
 
 Stopping capture stops both batched sources, drains delivered writes, rewrites finalized headers, writes the sidecar, and only then queues the complete asset set. Pending-transfer markers are tracked per file while retention and retry grouping remain session-based.
 
-## Binary Constants
+## Binary Format
 
-- Device-motion magic: `WMRDM001`
-- Raw-accelerometer magic: `WMRRA001`
-- Writer format version: `2` (version `1` remains readable)
-- User acceleration: `64 / 32767` g/count
-- Rotation rate: `64 / 32767` rad/s/count
-- Gravity and quaternion: `1 / 32767` unit/count
-- Raw acceleration: `256 / 32767` g/count
+**Header** (64 bytes, little-endian):
 
-Finite out-of-range values clamp to `-32767...32767` and increment the relevant file saturation count. `Int16.min` is reserved and rejected. Non-finite values and timestamp regression fail the active recording.
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 8 | Magic (`WMRDM001` or `WMRRA001`) |
+| 8 | 2 | Format version (`1`) |
+| 10 | 2 | Record size in bytes |
+| 12 | 8 | Sample count |
+| 20 | 16 | Session UUID (RFC 4122, raw) |
+| 36 | 2 | Actual frequency (Hz) |
+| 38 | 26 | Reserved (zero) |
+
+**Device-motion record** (60 bytes):
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 8 | Timestamp (Int64, Unix microseconds) |
+| 8 | 4 | userAcceleration.x (Float32) |
+| 12 | 4 | userAcceleration.y (Float32) |
+| 16 | 4 | userAcceleration.z (Float32) |
+| 20 | 4 | rotationRate.x (Float32) |
+| 24 | 4 | rotationRate.y (Float32) |
+| 28 | 4 | rotationRate.z (Float32) |
+| 32 | 4 | gravity.x (Float32) |
+| 36 | 4 | gravity.y (Float32) |
+| 40 | 4 | gravity.z (Float32) |
+| 44 | 4 | quaternion.w (Float32) |
+| 48 | 4 | quaternion.x (Float32) |
+| 52 | 4 | quaternion.y (Float32) |
+| 56 | 4 | quaternion.z (Float32) |
+
+**Raw-accelerometer record** (20 bytes):
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 8 | Timestamp (Int64, Unix microseconds) |
+| 8 | 4 | rawAcceleration.x (Float32) |
+| 12 | 4 | rawAcceleration.y (Float32) |
+| 16 | 4 | rawAcceleration.z (Float32) |
+
+Non-finite values and timestamp regression fail the active recording.
 
 ## What It Does Not Contain
 

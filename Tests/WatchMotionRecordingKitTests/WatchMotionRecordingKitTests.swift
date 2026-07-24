@@ -57,23 +57,18 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             stream: .deviceMotion,
             sampleCount: 0x0102_0304_0506_0708,
             sessionID: sessionID,
-            actualFrequencyHz: 200,
-            saturationCount: 13
+            actualFrequencyHz: 200
         )
 
         let bytes = try header.encoded()
 
         XCTAssertEqual(bytes.count, 64)
         XCTAssertEqual(Data(bytes[0..<8]), Data("WMRDM001".utf8))
-        XCTAssertEqual(Array(bytes[8..<12]), [1, 0, 34, 0])
+        XCTAssertEqual(Array(bytes[8..<12]), [1, 0, 60, 0])
         XCTAssertEqual(Array(bytes[12..<20]), [8, 7, 6, 5, 4, 3, 2, 1])
         XCTAssertEqual(Array(bytes[20..<36]), [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255])
-        XCTAssertEqual(Array(bytes[36..<40]), [200, 0, 4, 0])
-        XCTAssertEqual(readUInt32(bytes, at: 40), WatchMotionBinaryStream.deviceMotion.quantizationScales[0].bitPattern)
-        XCTAssertEqual(readUInt32(bytes, at: 44), WatchMotionBinaryStream.deviceMotion.quantizationScales[1].bitPattern)
-        XCTAssertEqual(readUInt32(bytes, at: 48), WatchMotionBinaryStream.deviceMotion.quantizationScales[2].bitPattern)
-        XCTAssertEqual(readUInt32(bytes, at: 52), WatchMotionBinaryStream.deviceMotion.quantizationScales[3].bitPattern)
-        XCTAssertEqual(Array(bytes[56..<64]), [13, 0, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(Array(bytes[36..<38]), [200, 0])
+        XCTAssertEqual(Array(bytes[38..<64]), [UInt8](repeating: 0, count: 26))
         XCTAssertEqual(try WatchMotionBinaryHeader.decode(from: bytes), header)
     }
 
@@ -82,8 +77,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             stream: .deviceMotion,
             sampleCount: 0,
             sessionID: "20260722_143012",
-            actualFrequencyHz: 200,
-            saturationCount: 0
+            actualFrequencyHz: 200
         )
 
         XCTAssertThrowsError(try header.encoded()) {
@@ -91,57 +85,65 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         }
     }
 
-    func testRawAccelerometerHeaderHasOneScaleAndZeroUnusedSlots() throws {
+    func testRawAccelerometerHeaderHasCorrectMagic() throws {
         let header = WatchMotionBinaryHeader(
             stream: .rawAccelerometer,
             sampleCount: 2,
             sessionID: "aabbccdd-eeff-4011-8233-445566778899",
-            actualFrequencyHz: 800,
-            saturationCount: 0
+            actualFrequencyHz: 800
         )
 
         let bytes = try header.encoded()
         let decoded = try WatchMotionBinaryHeader.decode(from: bytes, expectedStream: .rawAccelerometer)
 
         XCTAssertEqual(Data(bytes[0..<8]), Data("WMRRA001".utf8))
-        XCTAssertEqual(decoded.recordSize, 14)
-        XCTAssertEqual(decoded.scaleCount, 1)
-        XCTAssertEqual(decoded.quantizationScales[0].bitPattern, Float(256.0 / 32_767.0).bitPattern)
-        XCTAssertEqual(decoded.quantizationScales.dropFirst(), [0, 0, 0])
+        XCTAssertEqual(decoded.recordSize, 20)
+        XCTAssertEqual(decoded.sampleCount, 2)
+        XCTAssertEqual(decoded.actualFrequencyHz, 800)
     }
 
     func testDeviceMotionRecordHasExactFieldOrderAndLittleEndianBytes() throws {
-        let scales = WatchMotionBinaryStream.deviceMotion.quantizationScales
         let record = WatchDeviceMotionBinaryRecord(
             timestampUnixMicroseconds: 0x0102_0304_0506_0708,
-            userAccelerationX: Double(scales[0]) * 1,
-            userAccelerationY: Double(scales[0]) * 2,
-            userAccelerationZ: Double(scales[0]) * 3,
-            rotationRateX: Double(scales[1]) * 4,
-            rotationRateY: Double(scales[1]) * 5,
-            rotationRateZ: Double(scales[1]) * 6,
-            gravityX: Double(scales[2]) * 7,
-            gravityY: Double(scales[2]) * 8,
-            gravityZ: Double(scales[2]) * 9,
-            quaternionW: Double(scales[3]) * 10,
-            quaternionX: Double(scales[3]) * 11,
-            quaternionY: Double(scales[3]) * 12,
-            quaternionZ: Double(scales[3]) * 13
+            userAccelerationX: 1.5,
+            userAccelerationY: 2.5,
+            userAccelerationZ: 3.5,
+            rotationRateX: 4.0,
+            rotationRateY: 5.0,
+            rotationRateZ: 6.0,
+            gravityX: 0.1,
+            gravityY: 0.2,
+            gravityZ: 0.9,
+            quaternionW: 1.0,
+            quaternionX: 0.0,
+            quaternionY: 0.0,
+            quaternionZ: 0.0
         )
 
         let encoded = try record.encoded()
 
-        XCTAssertEqual(encoded.data.count, 34)
+        XCTAssertEqual(encoded.data.count, 60)
         XCTAssertEqual(Array(encoded.data[0..<8]), [8, 7, 6, 5, 4, 3, 2, 1])
-        XCTAssertEqual(
-            Array(encoded.data[8..<34]),
-            (1...13).flatMap { [UInt8($0), 0] }
-        )
-        XCTAssertEqual(encoded.saturationCount, 0)
+
+        let decoded = try WatchDeviceMotionBinaryRecord.decode(from: encoded.data)
+
+        XCTAssertEqual(decoded.timestampUnixMicroseconds, record.timestampUnixMicroseconds)
+        XCTAssertEqual(decoded.userAccelerationX, record.userAccelerationX, accuracy: 0.001)
+        XCTAssertEqual(decoded.userAccelerationY, record.userAccelerationY, accuracy: 0.001)
+        XCTAssertEqual(decoded.userAccelerationZ, record.userAccelerationZ, accuracy: 0.001)
+        XCTAssertEqual(decoded.rotationRateX, record.rotationRateX, accuracy: 0.001)
+        XCTAssertEqual(decoded.rotationRateY, record.rotationRateY, accuracy: 0.001)
+        XCTAssertEqual(decoded.rotationRateZ, record.rotationRateZ, accuracy: 0.001)
+        XCTAssertEqual(decoded.gravityX, record.gravityX, accuracy: 0.001)
+        XCTAssertEqual(decoded.gravityY, record.gravityY, accuracy: 0.001)
+        XCTAssertEqual(decoded.gravityZ, record.gravityZ, accuracy: 0.001)
+        XCTAssertEqual(decoded.quaternionW, record.quaternionW, accuracy: 0.001)
+        XCTAssertEqual(decoded.quaternionX, record.quaternionX, accuracy: 0.001)
+        XCTAssertEqual(decoded.quaternionY, record.quaternionY, accuracy: 0.001)
+        XCTAssertEqual(decoded.quaternionZ, record.quaternionZ, accuracy: 0.001)
     }
 
-    func testRawAccelerometerRecordRoundTripsWithinHalfScale() throws {
-        let scale = WatchMotionBinaryStream.rawAccelerometer.quantizationScales[0]
+    func testRawAccelerometerRecordRoundTrips() throws {
         let source = WatchRawAccelerometerBinaryRecord(
             timestampUnixMicroseconds: 1_700_000_000_123_456,
             rawAccelerationX: -19.125,
@@ -152,40 +154,29 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         let decoded = try WatchRawAccelerometerBinaryRecord.decode(from: source.encoded().data)
 
         XCTAssertEqual(decoded.timestampUnixMicroseconds, source.timestampUnixMicroseconds)
-        XCTAssertEqual(decoded.rawAccelerationX, source.rawAccelerationX, accuracy: Double(scale) / 2)
-        XCTAssertEqual(decoded.rawAccelerationY, source.rawAccelerationY, accuracy: Double(scale) / 2)
-        XCTAssertEqual(decoded.rawAccelerationZ, source.rawAccelerationZ, accuracy: Double(scale) / 2)
-    }
-
-    func testQuantizationClampsSymmetricallyAndNeverEmitsReservedValue() throws {
-        let scale = WatchMotionBinaryStream.rawAccelerometer.quantizationScales[0]
-
-        let positive = try WatchMotionQuantizer.quantize(1_000, scale: scale)
-        let negative = try WatchMotionQuantizer.quantize(-1_000, scale: scale)
-
-        XCTAssertEqual(positive, WatchMotionQuantizedValue(value: 32_767, saturated: true))
-        XCTAssertEqual(negative, WatchMotionQuantizedValue(value: -32_767, saturated: true))
-        XCTAssertNotEqual(negative.value, .min)
+        XCTAssertEqual(decoded.rawAccelerationX, source.rawAccelerationX, accuracy: 0.001)
+        XCTAssertEqual(decoded.rawAccelerationY, source.rawAccelerationY, accuracy: 0.001)
+        XCTAssertEqual(decoded.rawAccelerationZ, source.rawAccelerationZ, accuracy: 0.001)
     }
 
     func testNonFiniteValuesAreRejected() {
-        let scale = WatchMotionBinaryStream.deviceMotion.quantizationScales[0]
-
-        XCTAssertThrowsError(try WatchMotionQuantizer.quantize(.nan, scale: scale)) {
+        XCTAssertThrowsError(try WatchDeviceMotionBinaryRecord(
+            timestampUnixMicroseconds: 0,
+            userAccelerationX: .nan,
+            userAccelerationY: 0,
+            userAccelerationZ: 0,
+            rotationRateX: 0,
+            rotationRateY: 0,
+            rotationRateZ: 0,
+            gravityX: 0,
+            gravityY: 0,
+            gravityZ: 0,
+            quaternionW: 0,
+            quaternionX: 0,
+            quaternionY: 0,
+            quaternionZ: 0
+        ).encoded()) {
             XCTAssertEqual($0 as? WatchMotionBinaryError, .nonFiniteValue)
-        }
-        XCTAssertThrowsError(try WatchMotionQuantizer.quantize(.infinity, scale: scale)) {
-            XCTAssertEqual($0 as? WatchMotionBinaryError, .nonFiniteValue)
-        }
-    }
-
-    func testReservedInt16MinimumIsRejectedDuringDecode() {
-        var bytes = Data(repeating: 0, count: WatchMotionBinaryContract.rawAccelerometerRecordByteCount)
-        bytes[8] = 0
-        bytes[9] = 0x80
-
-        XCTAssertThrowsError(try WatchRawAccelerometerBinaryRecord.decode(from: bytes)) {
-            XCTAssertEqual($0 as? WatchMotionBinaryError, .reservedQuantizedValue)
         }
     }
 
@@ -194,8 +185,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             stream: .deviceMotion,
             sampleCount: 0,
             sessionID: "00112233-4455-6677-8899-AABBCCDDEEFF",
-            actualFrequencyHz: 200,
-            saturationCount: 0
+            actualFrequencyHz: 200
         )
         var unsupported = try header.encoded()
         unsupported[8] = 3
@@ -218,14 +208,13 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             stream: .deviceMotion,
             sampleCount: 2,
             sessionID: "00112233-4455-6677-8899-AABBCCDDEEFF",
-            actualFrequencyHz: 200,
-            saturationCount: 0
+            actualFrequencyHz: 200
         )
 
-        XCTAssertThrowsError(try header.validateFileByteCount(64 + 34 + 1)) {
-            XCTAssertEqual($0 as? WatchMotionBinaryError, .invalidFileLength(99))
+        XCTAssertThrowsError(try header.validateFileByteCount(64 + 60 + 1)) {
+            XCTAssertEqual($0 as? WatchMotionBinaryError, .invalidFileLength(125))
         }
-        XCTAssertThrowsError(try header.validateFileByteCount(64 + 34)) {
+        XCTAssertThrowsError(try header.validateFileByteCount(64 + 60)) {
             XCTAssertEqual(
                 $0 as? WatchMotionBinaryError,
                 .sampleCountMismatch(expected: 2, actual: 1)
@@ -258,11 +247,9 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         let header = try WatchMotionBinaryHeader.decode(from: data, expectedStream: .rawAccelerometer)
 
         XCTAssertEqual(summary.sampleCount, 2)
-        XCTAssertEqual(summary.saturationCount, 1)
-        XCTAssertEqual(summary.byteCount, UInt64(64 + (2 * 14)))
+        XCTAssertEqual(summary.byteCount, UInt64(64 + (2 * 20)))
         XCTAssertEqual(summary.sha256, try WatchMotionFileIntegrity.sha256Hex(for: url))
         XCTAssertEqual(header.sampleCount, 2)
-        XCTAssertEqual(header.saturationCount, 1)
         XCTAssertEqual(header.formatVersion, WatchMotionBinaryContract.formatVersion)
         XCTAssertEqual(header.sessionID, sessionID.lowercased())
         XCTAssertEqual(try header.validateFileByteCount(data.count), 2)
@@ -399,11 +386,5 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             .appendingPathComponent("WatchMotionRecordingKitTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
-    }
-
-    private func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
-        data[offset..<(offset + 4)].enumerated().reduce(0) { result, pair in
-            result | (UInt32(pair.element) << UInt32(pair.offset * 8))
-        }
     }
 }
