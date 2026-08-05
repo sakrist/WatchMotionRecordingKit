@@ -1,6 +1,10 @@
 import CryptoKit
 import Foundation
 
+/// Fixed sizes and format version shared by writers and readers.
+///
+/// Changing any value here changes the on-disk contract and requires a new format
+/// version plus compatible readers in both consuming apps.
 public enum WatchMotionBinaryContract {
     public static let headerByteCount = 64
     public static let formatVersion: UInt16 = 1
@@ -9,6 +13,7 @@ public enum WatchMotionBinaryContract {
     public static let sessionIDByteCount = 16
 }
 
+/// Generates and parses the common filenames for one recording session.
 public enum WatchRecordingAssetNaming {
     public static func baseName(sessionID: String) -> String {
         "recording_\(canonicalSessionID(sessionID))"
@@ -26,12 +31,27 @@ public enum WatchRecordingAssetNaming {
         baseName(sessionID: sessionID) + ".watch.json"
     }
 
+    public static func audioFileName(sessionID: String) -> String {
+        baseName(sessionID: sessionID) + ".m4a"
+    }
+
+    public static func videoFileName(sessionID: String) -> String {
+        baseName(sessionID: sessionID) + ".mov"
+    }
+
+    public static func phoneMetadataFileName(sessionID: String) -> String {
+        baseName(sessionID: sessionID) + ".phone.json"
+    }
+
     public static func sessionID(from fileName: String) -> String? {
         guard fileName.hasPrefix("recording_") else { return nil }
         let suffixes = [
             WatchMotionBinaryStream.deviceMotion.fileSuffix,
             WatchMotionBinaryStream.rawAccelerometer.fileSuffix,
             ".watch.json",
+            ".phone.json",
+            ".m4a",
+            ".mov",
         ]
         guard let suffix = suffixes.first(where: fileName.hasSuffix) else { return nil }
         let start = fileName.index(fileName.startIndex, offsetBy: "recording_".count)
@@ -47,6 +67,7 @@ public enum WatchRecordingAssetNaming {
     }
 }
 
+/// The two independently timestamped sensor streams stored by each session.
 public enum WatchMotionBinaryStream: String, Codable, CaseIterable, Sendable {
     case deviceMotion
     case rawAccelerometer
@@ -97,6 +118,7 @@ public enum WatchMotionBinaryStream: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Validation and lifecycle errors for the versioned binary format.
 public enum WatchMotionBinaryError: Error, Equatable, LocalizedError {
     case invalidHeaderLength(Int)
     case invalidMagic
@@ -144,6 +166,11 @@ public enum WatchMotionBinaryError: Error, Equatable, LocalizedError {
     }
 }
 
+/// The fixed 64-byte prefix at the beginning of every motion binary file.
+///
+/// It identifies the stream and format, ties the file to a session UUID, and
+/// records the final frequency and sample count. Exact offsets are documented in
+/// the package README.
 public struct WatchMotionBinaryHeader: Sendable, Equatable {
     public let stream: WatchMotionBinaryStream
     public let formatVersion: UInt16
@@ -318,10 +345,14 @@ public struct WatchMotionBinaryHeader: Sendable, Equatable {
     }
 }
 
+/// Validated little-endian bytes for one sensor record.
 public struct WatchMotionEncodedRecord: Sendable, Equatable {
     public let data: Data
 }
 
+/// One 200 Hz device-motion sample with its own Unix-microsecond timestamp.
+///
+/// Values are exposed as `Double` to callers and encoded as `Float32` on disk.
 public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
     public let timestampUnixMicroseconds: Int64
     public let userAccelerationX: Double
@@ -372,17 +403,42 @@ public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
 
     public func encoded() throws -> WatchMotionEncodedRecord {
         var data = Data(capacity: WatchMotionBinaryContract.deviceMotionRecordByteCount)
-        data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
-        for value in [
-            userAccelerationX, userAccelerationY, userAccelerationZ,
-            rotationRateX, rotationRateY, rotationRateZ,
-            gravityX, gravityY, gravityZ,
-            quaternionW, quaternionX, quaternionY, quaternionZ,
-        ] {
-            guard value.isFinite else { throw WatchMotionBinaryError.nonFiniteValue }
-            data.appendLittleEndian(Float32(value))
-        }
+        try appendEncoded(to: &data)
         return WatchMotionEncodedRecord(data: data)
+    }
+
+    fileprivate func appendEncoded(to data: inout Data) throws {
+        guard userAccelerationX.isFinite,
+              userAccelerationY.isFinite,
+              userAccelerationZ.isFinite,
+              rotationRateX.isFinite,
+              rotationRateY.isFinite,
+              rotationRateZ.isFinite,
+              gravityX.isFinite,
+              gravityY.isFinite,
+              gravityZ.isFinite,
+              quaternionW.isFinite,
+              quaternionX.isFinite,
+              quaternionY.isFinite,
+              quaternionZ.isFinite
+        else {
+            throw WatchMotionBinaryError.nonFiniteValue
+        }
+
+        data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
+        data.appendLittleEndian(Float32(userAccelerationX))
+        data.appendLittleEndian(Float32(userAccelerationY))
+        data.appendLittleEndian(Float32(userAccelerationZ))
+        data.appendLittleEndian(Float32(rotationRateX))
+        data.appendLittleEndian(Float32(rotationRateY))
+        data.appendLittleEndian(Float32(rotationRateZ))
+        data.appendLittleEndian(Float32(gravityX))
+        data.appendLittleEndian(Float32(gravityY))
+        data.appendLittleEndian(Float32(gravityZ))
+        data.appendLittleEndian(Float32(quaternionW))
+        data.appendLittleEndian(Float32(quaternionX))
+        data.appendLittleEndian(Float32(quaternionY))
+        data.appendLittleEndian(Float32(quaternionZ))
     }
 
     public static func decode(from data: Data) throws -> Self {
@@ -409,6 +465,7 @@ public struct WatchDeviceMotionBinaryRecord: Sendable, Equatable {
     }
 }
 
+/// One native 800 Hz acceleration sample with its own Unix-microsecond timestamp.
 public struct WatchRawAccelerometerBinaryRecord: Sendable, Equatable {
     public let timestampUnixMicroseconds: Int64
     public let rawAccelerationX: Double
@@ -429,12 +486,22 @@ public struct WatchRawAccelerometerBinaryRecord: Sendable, Equatable {
 
     public func encoded() throws -> WatchMotionEncodedRecord {
         var data = Data(capacity: WatchMotionBinaryContract.rawAccelerometerRecordByteCount)
-        data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
-        for value in [rawAccelerationX, rawAccelerationY, rawAccelerationZ] {
-            guard value.isFinite else { throw WatchMotionBinaryError.nonFiniteValue }
-            data.appendLittleEndian(Float32(value))
-        }
+        try appendEncoded(to: &data)
         return WatchMotionEncodedRecord(data: data)
+    }
+
+    fileprivate func appendEncoded(to data: inout Data) throws {
+        guard rawAccelerationX.isFinite,
+              rawAccelerationY.isFinite,
+              rawAccelerationZ.isFinite
+        else {
+            throw WatchMotionBinaryError.nonFiniteValue
+        }
+
+        data.appendLittleEndian(UInt64(bitPattern: timestampUnixMicroseconds))
+        data.appendLittleEndian(Float32(rawAccelerationX))
+        data.appendLittleEndian(Float32(rawAccelerationY))
+        data.appendLittleEndian(Float32(rawAccelerationZ))
     }
 
     public static func decode(from data: Data) throws -> Self {
@@ -458,6 +525,7 @@ public struct WatchRawAccelerometerBinaryRecord: Sendable, Equatable {
     }
 }
 
+/// Final integrity and sample information copied into the Watch metadata sidecar.
 public struct WatchMotionBinaryFileSummary: Sendable, Equatable {
     public let stream: WatchMotionBinaryStream
     public let fileName: String
@@ -468,6 +536,11 @@ public struct WatchMotionBinaryFileSummary: Sendable, Equatable {
     public let actualFrequencyHz: UInt16
 }
 
+/// Writes one ordered sensor stream and finalizes its binary header and hash.
+///
+/// Initialization writes a placeholder header with zero samples. Appends validate
+/// monotonic timestamps. `finalize(actualFrequencyHz:)` rewrites the header with
+/// the true count, closes the file, validates its length, and calculates SHA-256.
 public final class WatchMotionBinaryFileWriter {
     public let stream: WatchMotionBinaryStream
     public let fileURL: URL
@@ -512,21 +585,71 @@ public final class WatchMotionBinaryFileWriter {
         try? handle?.close()
     }
 
+    /// Appends one device-motion record. Batch append is preferred during capture.
     public func append(_ record: WatchDeviceMotionBinaryRecord) throws {
         guard stream == .deviceMotion else { throw WatchMotionBinaryError.invalidMagic }
-        try append(timestamp: record.timestampUnixMicroseconds, encoded: record.encoded())
+        try append(
+            timestamp: record.timestampUnixMicroseconds,
+            encoded: record.encoded()
+        )
     }
 
+    /// Appends one raw-acceleration record. Batch append is preferred during capture.
     public func append(_ record: WatchRawAccelerometerBinaryRecord) throws {
         guard stream == .rawAccelerometer else { throw WatchMotionBinaryError.invalidMagic }
-        try append(timestamp: record.timestampUnixMicroseconds, encoded: record.encoded())
+        try append(
+            timestamp: record.timestampUnixMicroseconds,
+            encoded: record.encoded()
+        )
     }
 
+    /// Encodes and writes a device-motion batch as one contiguous payload.
+    public func append(contentsOf records: [WatchDeviceMotionBinaryRecord]) throws {
+        guard stream == .deviceMotion else { throw WatchMotionBinaryError.invalidMagic }
+        guard !records.isEmpty else { return }
+
+        var payload = Data(capacity: records.count * WatchMotionBinaryContract.deviceMotionRecordByteCount)
+        var previousTimestamp = lastTimestamp
+        for record in records {
+            try validateTimestamp(record.timestampUnixMicroseconds, after: previousTimestamp)
+            try record.appendEncoded(to: &payload)
+            previousTimestamp = record.timestampUnixMicroseconds
+        }
+        try appendEncodedBatch(
+            payload,
+            sampleCount: records.count,
+            lastTimestamp: previousTimestamp
+        )
+    }
+
+    /// Encodes and writes a raw-acceleration batch as one contiguous payload.
+    public func append(contentsOf records: [WatchRawAccelerometerBinaryRecord]) throws {
+        guard stream == .rawAccelerometer else { throw WatchMotionBinaryError.invalidMagic }
+        guard !records.isEmpty else { return }
+
+        var payload = Data(capacity: records.count * WatchMotionBinaryContract.rawAccelerometerRecordByteCount)
+        var previousTimestamp = lastTimestamp
+        for record in records {
+            try validateTimestamp(record.timestampUnixMicroseconds, after: previousTimestamp)
+            try record.appendEncoded(to: &payload)
+            previousTimestamp = record.timestampUnixMicroseconds
+        }
+        try appendEncodedBatch(
+            payload,
+            sampleCount: records.count,
+            lastTimestamp: previousTimestamp
+        )
+    }
+
+    /// Requests that already-written bytes be synchronized to storage.
     public func synchronize() throws {
         guard let handle else { throw WatchMotionBinaryError.writerFinalized }
         try handle.synchronize()
     }
 
+    /// Seals the file and returns metadata required to validate it after transfer.
+    ///
+    /// A finalized writer cannot accept more records.
     public func finalize(actualFrequencyHz: UInt16) throws -> WatchMotionBinaryFileSummary {
         guard let handle else { throw WatchMotionBinaryError.writerFinalized }
         let header = WatchMotionBinaryHeader(
@@ -555,16 +678,30 @@ public final class WatchMotionBinaryFileWriter {
     }
 
     private func append(timestamp: Int64, encoded: WatchMotionEncodedRecord) throws {
+        guard handle != nil else { throw WatchMotionBinaryError.writerFinalized }
+        try validateTimestamp(timestamp, after: lastTimestamp)
+        try appendEncodedBatch(encoded.data, sampleCount: 1, lastTimestamp: timestamp)
+    }
+
+    private func appendEncodedBatch(
+        _ payload: Data,
+        sampleCount: Int,
+        lastTimestamp: Int64?
+    ) throws {
         guard let handle else { throw WatchMotionBinaryError.writerFinalized }
-        if let lastTimestamp, timestamp < lastTimestamp {
-            throw WatchMotionBinaryError.nonMonotonicTimestamp(previous: lastTimestamp, next: timestamp)
+        try handle.write(contentsOf: payload)
+        self.lastTimestamp = lastTimestamp
+        self.sampleCount += UInt64(sampleCount)
+    }
+
+    private func validateTimestamp(_ timestamp: Int64, after previousTimestamp: Int64?) throws {
+        if let previousTimestamp, timestamp < previousTimestamp {
+            throw WatchMotionBinaryError.nonMonotonicTimestamp(previous: previousTimestamp, next: timestamp)
         }
-        try handle.write(contentsOf: encoded.data)
-        lastTimestamp = timestamp
-        sampleCount += 1
     }
 }
 
+/// File-size and streaming SHA-256 helpers used during finalization and import.
 public enum WatchMotionFileIntegrity {
     public static func byteCount(for url: URL) throws -> UInt64 {
         let values = try url.resourceValues(forKeys: [.fileSizeKey])
@@ -585,6 +722,7 @@ public enum WatchMotionFileIntegrity {
     }
 }
 
+/// Converts projected Unix seconds into the integer timestamp stored on disk.
 public enum WatchMotionTimestamp {
     public static func unixMicroseconds(from unixSeconds: Double) throws -> Int64 {
         guard unixSeconds.isFinite else {

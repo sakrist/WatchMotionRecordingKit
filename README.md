@@ -2,6 +2,11 @@
 
 Reusable Apple Watch motion-recording primitives.
 
+## Start Here
+
+For a plain-language explanation of what happens after the user taps Record,
+including an ordered flow diagram, see [Recording Flow](docs/RECORDING_FLOW.md).
+
 ## What It Contains
 
 - Recording-control messages and scheduled-start replies
@@ -10,6 +15,19 @@ Reusable Apple Watch motion-recording primitives.
 - Shared uptime-to-Unix timestamp projection with scheduled-start gating
 - Versioned fixed-record binary codecs, integrity hashes, and writers
 - WatchConnectivity transfer and retained pending-session coordination
+
+## Internal Structure
+
+`WatchRecordingCoordinator` is the public facade used by app code. It owns
+published state, start/stop intent, and transfer commands. Session setup and
+cleanup live in a focused coordinator extension, while Core Motion callbacks,
+startup validation, timestamp gating, and ordered writes stay together in the
+motion-capture extension so their sequencing remains visible in one place.
+
+Live graph decimation is owned by a small value-type buffer and optional audio
+capture is owned by a dedicated helper. These are concrete internal types, not
+public protocols. The split keeps the shared API stable and leaves room to
+replace one capability without turning the package into a framework hierarchy.
 
 ## Capture Contract
 
@@ -23,11 +41,21 @@ recording_<session-id>.raw-accelerometer.bin
 recording_<session-id>.watch.json
 ```
 
+When `WatchRecordingConfiguration.recordsAudio` is enabled, the same session
+also produces `recording_<session-id>.m4a`. Audio is transferred with the
+motion assets but is intentionally not part of the motion sidecar because it
+has no binary sample-count or hash contract in this package.
+
 Both sensor files have explicit 64-byte little-endian headers. The Watch generates one UUID per recording, uses its lowercase string form for asset names and metadata, and encodes its native 16 bytes in both headers. Device-motion records are 60 bytes and contain a Unix-microsecond timestamp, user acceleration, rotation rate, gravity, and quaternion as Float32 values. Raw-accelerometer records are 20 bytes and contain a timestamp plus three acceleration components as Float32 values. The streams retain their independent timestamps and are never assumed to be row-aligned.
 
 The metadata sidecar names both files and records their finalized byte sizes, SHA-256 hashes, format versions, actual frequencies, and sample counts. `applicationPayloads` remains available for app-owned sidecar data such as strike ratings.
 
-Stopping capture stops both batched sources, drains delivered writes, rewrites finalized headers, writes the sidecar, and only then queues the complete asset set. Pending-transfer markers are tracked per file while retention and retry grouping remain session-based.
+The coordinator buffers accepted samples for about one second per stream before
+writing, then forces any final partial batch during stop. Stopping capture
+stops both batched sources, drains delivered writes, rewrites finalized headers,
+writes the sidecar, and only then queues the complete asset set. Pending-transfer
+markers are tracked per file while retention and retry grouping remain
+session-based.
 
 ## Binary Format
 

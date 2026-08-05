@@ -1,5 +1,9 @@
 import Foundation
 
+/// Converts Core Motion's monotonic uptime timestamps into Unix wall-clock time.
+///
+/// The first observation establishes an anchor. Later samples use only timestamp
+/// differences, so a wall-clock adjustment during recording cannot create jumps.
 public struct UnixTimeProjector: Sendable, Equatable {
     public private(set) var unixTimeAnchor: Double?
     public private(set) var motionTimestampAnchor: TimeInterval?
@@ -12,6 +16,7 @@ public struct UnixTimeProjector: Sendable, Equatable {
         self.motionTimestampAnchor = motionTimestampAnchor
     }
 
+    /// Projects a timestamp when the supplied Unix time describes that same sample.
     public mutating func project(
         motionTimestamp: TimeInterval,
         unixNow: Double
@@ -25,6 +30,10 @@ public struct UnixTimeProjector: Sendable, Equatable {
         return unixNow
     }
 
+    /// Projects a batched sample by anchoring callback Unix time to system uptime.
+    ///
+    /// This overload is used for delayed Core Motion batches: the sample's original
+    /// uptime timestamp is preserved instead of assigning every sample callback time.
     public mutating func project(
         motionTimestamp: TimeInterval,
         unixNow: Double,
@@ -40,6 +49,7 @@ public struct UnixTimeProjector: Sendable, Equatable {
     }
 }
 
+/// Result of comparing one projected sample against the planned session start.
 public struct SampleGateDecision: Sendable, Equatable {
     public let sampleUnixTime: Double
     public let shouldKeepSample: Bool
@@ -56,6 +66,7 @@ public struct SampleGateDecision: Sendable, Equatable {
     }
 }
 
+/// Drops pre-roll motion samples and remembers the first accepted sample time.
 public struct ScheduledSampleGate: Sendable, Equatable {
     public let startUnixTime: Double
     public private(set) var firstAcceptedSampleUnixTime: Double?
@@ -68,6 +79,7 @@ public struct ScheduledSampleGate: Sendable, Equatable {
         self.firstAcceptedSampleUnixTime = firstAcceptedSampleUnixTime
     }
 
+    /// Decides whether one projected sample belongs to the useful recording interval.
     public mutating func evaluate(sampleUnixTime: Double) -> SampleGateDecision {
         guard sampleUnixTime >= startUnixTime else {
             return SampleGateDecision(
@@ -90,6 +102,10 @@ public struct ScheduledSampleGate: Sendable, Equatable {
     }
 }
 
+/// Convenience value that combines one projector and one scheduled-start gate.
+///
+/// The coordinator uses a shared projector with separate gates for its two streams;
+/// this type remains useful for clients that process a single stream.
 public struct WatchSampleTimingController: Sendable, Equatable {
     public private(set) var projector: UnixTimeProjector
     public private(set) var gate: ScheduledSampleGate

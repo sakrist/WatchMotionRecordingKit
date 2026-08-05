@@ -2,17 +2,37 @@ import Foundation
 import OSLog
 import WatchConnectivity
 
+/// Communication boundary between recording logic and WatchConnectivity.
+///
+/// The protocol keeps the coordinator testable without hiding recording behavior
+/// behind a larger service hierarchy.
 public protocol WatchRecordingTransport: AnyObject {
+    /// Called once WatchConnectivity finishes attempting one file transfer.
     var fileTransferCompletionHandler: ((URL, Error?) -> Void)? { get set }
+
+    /// Called when the phone asks the Watch to retry locally retained files.
     var pendingTransferRetryRequestHandler: (() -> Void)? { get set }
 
+    /// Activates the underlying communication session.
     func activate()
+
+    /// Cancels currently queued file transfers without deleting local files.
     func cancelOutstandingFileTransfers()
+
+    /// Queues completed files for background delivery to the iPhone.
     func transferRecordingFiles(sessionID: String, fileURLs: [URL])
+
+    /// Sends an immediate start or stop marker to the reachable iPhone app.
     func sendRecordingControl(action: RecordingControlAction, sessionID: String)
+
+    /// Asks the iPhone to begin video pre-roll and choose a shared future start.
     func requestScheduledStart(sessionID: String, leadTime: TimeInterval) async -> ScheduledStartResponse?
 }
 
+/// WatchConnectivity implementation used by the real Watch app.
+///
+/// Control messages require the iPhone to be reachable. Completed file transfer
+/// uses WatchConnectivity's queued background mechanism and can finish later.
 public final class WatchConnectivityRecordingTransport: NSObject, WatchRecordingTransport, WCSessionDelegate {
     public var fileTransferCompletionHandler: ((URL, Error?) -> Void)?
     public var pendingTransferRetryRequestHandler: (() -> Void)?
@@ -41,6 +61,7 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         logger.info("Cancelled outstanding file transfers: \(transfers.count)")
     }
 
+    /// Queues only files that are not already represented by an outstanding transfer.
     public func transferRecordingFiles(sessionID: String, fileURLs: [URL]) {
         guard WCSession.isSupported() else {
             logger.error("WCSession unsupported; cannot transfer session \(sessionID, privacy: .public)")
@@ -66,21 +87,41 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         }
     }
 
+    /// Sends a live control marker; unlike files, this cannot wait for an unreachable phone.
     public func sendRecordingControl(action: RecordingControlAction, sessionID: String) {
-        guard WCSession.isSupported() else { return }
+        guard WCSession.isSupported() else {
+            logger.error("Cannot send \(action.rawValue, privacy: .public) control; WatchConnectivity is unsupported. session=\(sessionID, privacy: .public)")
+            return
+        }
 
         let session = WCSession.default
-        guard session.activationState == .activated, session.isReachable else { return }
+        guard session.activationState == .activated, session.isReachable else {
+            logger.error("Cannot send \(action.rawValue, privacy: .public) control; iPhone is unavailable. session=\(sessionID, privacy: .public) activation=\(String(describing: session.activationState), privacy: .public) reachable=\(session.isReachable, privacy: .public)")
+            return
+        }
 
         let message = RecordingControlMessage(action: action, sessionID: sessionID)
-        session.sendMessage(message.dictionaryRepresentation, replyHandler: nil, errorHandler: nil)
+        logger.info("Sending \(action.rawValue, privacy: .public) recording control. session=\(sessionID, privacy: .public)")
+        session.sendMessage(message.dictionaryRepresentation, replyHandler: nil) { [logger] error in
+            logger.error("Recording control failed. action=\(action.rawValue, privacy: .public) session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        }
     }
 
+    /// Sends `.prepare` and waits for the iPhone's acceptance and planned start time.
+    ///
+    /// An accepted reply means the phone has started video pre-roll. A missing or
+    /// rejected reply prevents the Watch session when synchronized video is required.
     public func requestScheduledStart(sessionID: String, leadTime: TimeInterval) async -> ScheduledStartResponse? {
-        guard WCSession.isSupported() else { return nil }
+        guard WCSession.isSupported() else {
+            logger.error("Cannot prepare iPhone video; WatchConnectivity is unsupported. session=\(sessionID, privacy: .public)")
+            return nil
+        }
 
         let session = WCSession.default
-        guard session.activationState == .activated, session.isReachable else { return nil }
+        guard session.activationState == .activated, session.isReachable else {
+            logger.error("Cannot prepare iPhone video; iPhone is unavailable. session=\(sessionID, privacy: .public) activation=\(String(describing: session.activationState), privacy: .public) reachable=\(session.isReachable, privacy: .public)")
+            return nil
+        }
 
         return await withCheckedContinuation { continuation in
             let message = RecordingControlMessage(
@@ -89,9 +130,13 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
                 leadTime: leadTime
             )
 
+            self.logger.info("Requesting iPhone video pre-roll. session=\(sessionID, privacy: .public) leadTime=\(leadTime, privacy: .public)s")
             session.sendMessage(message.dictionaryRepresentation, replyHandler: { reply in
-                continuation.resume(returning: ScheduledStartResponse(dictionary: reply))
-            }, errorHandler: { _ in
+                let response = ScheduledStartResponse(dictionary: reply)
+                self.logger.info("Received iPhone video pre-roll reply. session=\(sessionID, privacy: .public) accepted=\(response?.accepted ?? false, privacy: .public)")
+                continuation.resume(returning: response)
+            }, errorHandler: { error in
+                self.logger.error("iPhone video pre-roll request failed. session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 continuation.resume(returning: nil)
             })
         }
@@ -109,6 +154,7 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         }
     }
 
+    /// Marks a local file synchronized only after WatchConnectivity reports success.
     public func session(
         _ session: WCSession,
         didFinish fileTransfer: WCSessionFileTransfer,

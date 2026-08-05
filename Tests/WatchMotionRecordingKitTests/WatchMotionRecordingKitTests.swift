@@ -19,6 +19,35 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(ScheduledStartResponse(dictionary: response.dictionaryRepresentation), response)
     }
 
+    func testLocalOnlyRecordingNeverAddsScheduledStartDelay() {
+        let delay = WatchRecordingStartTiming.scheduledDelay(
+            coordinatesWithPhoneRecording: false,
+            plannedStartUnix: 102,
+            nowUnix: 100
+        )
+
+        XCTAssertEqual(delay, 0)
+    }
+
+    func testPhoneCoordinatedRecordingWaitsOnlyForRemainingLeadTime() {
+        XCTAssertEqual(
+            WatchRecordingStartTiming.scheduledDelay(
+                coordinatesWithPhoneRecording: true,
+                plannedStartUnix: 102,
+                nowUnix: 100
+            ),
+            2
+        )
+        XCTAssertEqual(
+            WatchRecordingStartTiming.scheduledDelay(
+                coordinatesWithPhoneRecording: true,
+                plannedStartUnix: 99,
+                nowUnix: 100
+            ),
+            0
+        )
+    }
+
     func testSharedUnixTimeProjectorPreservesIndependentSampleTimes() {
         var projector = UnixTimeProjector()
 
@@ -255,6 +284,43 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(try header.validateFileByteCount(data.count), 2)
     }
 
+    func testWriterAppendsAWholeBatchAsOneLogicalPayload() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionID = "00112233-4455-6677-8899-aabbccddeeff"
+        let url = directory.appendingPathComponent("recording_\(sessionID).raw-accelerometer.bin")
+        let writer = try WatchMotionBinaryFileWriter(
+            stream: .rawAccelerometer,
+            fileURL: url,
+            sessionID: sessionID
+        )
+
+        let records = [
+            rawRecord(timestamp: 10, x: 1),
+            rawRecord(timestamp: 11, x: 2),
+            rawRecord(timestamp: 12, x: 3),
+        ]
+        var expectedPayload = Data()
+        for record in records {
+            expectedPayload.append(try record.encoded().data)
+        }
+
+        try writer.append(contentsOf: records)
+
+        let summary = try writer.finalize(actualFrequencyHz: 800)
+        let data = try Data(contentsOf: url)
+        let header = try WatchMotionBinaryHeader.decode(
+            from: data,
+            expectedStream: .rawAccelerometer,
+            expectedSessionID: sessionID
+        )
+
+        XCTAssertEqual(summary.sampleCount, 3)
+        XCTAssertEqual(header.sampleCount, 3)
+        XCTAssertEqual(data.count, WatchMotionBinaryContract.headerByteCount + (3 * WatchMotionBinaryContract.rawAccelerometerRecordByteCount))
+        XCTAssertEqual(Data(data.dropFirst(WatchMotionBinaryContract.headerByteCount)), expectedPayload)
+    }
+
     func testDualStreamSummariesFinalizeMetadataAsOneAssetSet() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -333,6 +399,62 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             WatchPendingRecordingStore.pendingSessions().first { $0.sessionID == sessionID }
         )
         XCTAssertEqual(Set(retry.fileURLs), Set(urls.dropFirst()))
+    }
+
+    func testLiveTelemetryThrottlesPublishedSnapshots() throws {
+        var telemetry = WatchLiveTelemetryBuffer(maximumPointCount: 3)
+
+        XCTAssertNil(telemetry.snapshotIfDue(
+            now: 0.05,
+            sampleCount: 10,
+            latestAccelMagnitude: 1,
+            latestGyroMagnitude: 2
+        ))
+
+        let snapshot = try XCTUnwrap(telemetry.snapshotIfDue(
+            now: 0.1,
+            sampleCount: 20,
+            latestAccelMagnitude: 3,
+            latestGyroMagnitude: 4
+        ))
+        XCTAssertEqual(snapshot.sampleCount, 20)
+        XCTAssertEqual(snapshot.latestAccelMagnitude, 3)
+        XCTAssertEqual(snapshot.latestGyroMagnitude, 4)
+        XCTAssertFalse(snapshot.includesGraph)
+        XCTAssertTrue(snapshot.accelPoints.isEmpty)
+        XCTAssertNil(telemetry.snapshotIfDue(
+            now: 0.15,
+            sampleCount: 30,
+            latestAccelMagnitude: 5,
+            latestGyroMagnitude: 6
+        ))
+    }
+
+    func testLiveTelemetryDecimatesAndCapsGraphHistory() throws {
+        var telemetry = WatchLiveTelemetryBuffer(maximumPointCount: 3)
+        XCTAssertTrue(telemetry.setGraphEnabled(true))
+        XCTAssertFalse(telemetry.setGraphEnabled(true))
+
+        var accelPoints: [Double] = []
+        var gyroPoints: [Double] = []
+        for sample in 0..<40 where telemetry.shouldAppendGraphPoint() {
+            accelPoints.append(Double(sample))
+            gyroPoints.append(Double(sample * 10))
+        }
+        telemetry.appendGraphPoints(
+            accelMagnitudes: accelPoints,
+            gyroMagnitudes: gyroPoints
+        )
+
+        let snapshot = try XCTUnwrap(telemetry.snapshotIfDue(
+            now: 1,
+            sampleCount: 40,
+            latestAccelMagnitude: 39,
+            latestGyroMagnitude: 390
+        ))
+        XCTAssertTrue(snapshot.includesGraph)
+        XCTAssertEqual(snapshot.accelPoints, [16, 24, 32])
+        XCTAssertEqual(snapshot.gyroPoints, [160, 240, 320])
     }
 
     func testAssetNamingRequiresUUIDAcrossBothBinarySuffixesAndMetadata() {

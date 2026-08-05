@@ -1,0 +1,132 @@
+digraph RecordingFlow {
+    graph [
+        rankdir=TB,
+        bgcolor="white",
+        pad=0.35,
+        nodesep=0.35,
+        ranksep=0.48,
+        fontname="Helvetica",
+        fontsize=16,
+        labelloc="t",
+        labeljust="l",
+        compound=true,
+        newrank=true
+    ];
+
+    node [
+        shape=box,
+        style="rounded,filled",
+        color="#B8C0CC",
+        fillcolor="#F7F8FA",
+        fontcolor="#1D2433",
+        fontname="Helvetica",
+        fontsize=12,
+        penwidth=1.2,
+        margin="0.18,0.12",
+        width=4.8
+    ];
+
+    edge [
+        color="#667085",
+        fontcolor="#475467",
+        fontname="Helvetica",
+        fontsize=10,
+        penwidth=1.4,
+        arrowsize=0.75
+    ];
+
+    subgraph cluster_starting {
+        label="STARTING";
+        color="#8EB2E3";
+        fillcolor="#F3F7FD";
+        fontcolor="#244A7C";
+        penwidth=1.5;
+        style="rounded,filled";
+        margin=18;
+
+        start [label="1. User taps Start on the Watch", fillcolor="#E8F1FD", color="#6D9BD3"];
+        supported [label="2. High-frequency batched motion supported?", shape=diamond, width=4.1, fillcolor="#FFF9E8", color="#C79A37"];
+        permission [label="3. If Watch audio is enabled:\nrequest microphone permission"];
+        files [label="4. Create one session ID, two binary writers,\nand the initial metadata file"];
+        phone [label="5. If synchronized video is enabled:\nask the iPhone to start pre-roll and return\na shared planned start time"];
+        timing [label="6. Reset timestamp projection, independent\nstart gates, buffers, and initial metadata"];
+        audio [label="7. Schedule optional Watch audio\nfor the shared start time"];
+        sensors [label="8. Start 200 Hz device motion and\n800 Hz raw acceleration\n\nCallbacks, countdown, and validation now run together", fillcolor="#E8F1FD", color="#6D9BD3"];
+        rates [label="Both streams confirm the expected rates\nwithin 3 seconds?", shape=diamond, width=4.4, fillcolor="#FFF9E8", color="#C79A37"];
+        countdown [label="9. Count down to the planned start\nPre-start samples are rejected by the gates"];
+
+        start -> supported;
+        supported -> permission [label="yes"];
+        permission -> files;
+        files -> phone;
+        phone -> timing;
+        timing -> audio;
+        audio -> sensors;
+        sensors -> rates [label="background validation"];
+        sensors -> countdown [label="at the same time"];
+    }
+
+    subgraph cluster_recording {
+        label="WHILE RECORDING";
+        color="#78B894";
+        fillcolor="#F1F9F4";
+        fontcolor="#26643E";
+        penwidth=1.5;
+        style="rounded,filled";
+        margin=18;
+
+        accept [label="10. At the planned time, accept samples\nand send the iPhone a start marker", fillcolor="#E5F5EB", color="#5A9E72"];
+        batches [label="11. Until Stop, Core Motion continues\ndelivering sensor batches"];
+        ordered [label="12. One serial queue preserves order, projects\nUnix timestamps, and applies each stream's gate"];
+        encode [label="13. Encode every accepted sample\ninto its own binary stream"];
+        write [label="14. Append buffered records about once per second\nNo averaging or downsampling\n\nUI preview separately publishes at most 10 times/second\nand keeps 1 in 8 graph points", fillcolor="#E5F5EB", color="#5A9E72"];
+
+        rates -> accept [label="yes", ltail=cluster_starting, lhead=cluster_recording];
+        countdown -> accept [label="planned time", ltail=cluster_starting, lhead=cluster_recording];
+        accept -> batches;
+        batches -> ordered;
+        ordered -> encode;
+        encode -> write;
+    }
+
+    subgraph cluster_stopping {
+        label="STOPPING AND TRANSFER";
+        color="#D5A257";
+        fillcolor="#FFF8EE";
+        fontcolor="#744716";
+        penwidth=1.5;
+        style="rounded,filled";
+        margin=18;
+
+        stop [label="15. User taps Stop", fillcolor="#FFF0DB", color="#C98B34"];
+        stop_sources [label="16. Stop both motion sources"];
+        drain [label="17. Drain the serial queue and force-write\nthe final partial batch"];
+        stop_audio [label="18. Stop optional Watch audio"];
+        finalize [label="19. Finalize headers, true sample counts,\nfrequencies, hashes, and metadata"];
+        stop_phone [label="20. Tell the iPhone to stop video"];
+        transfer [label="21. Queue every completed file\nfor background WatchConnectivity transfer"];
+        retained [label="22. Keep local files until each transfer\nis confirmed", fillcolor="#FFF0DB", color="#C98B34"];
+
+        write -> stop [label="Stop requested", ltail=cluster_recording, lhead=cluster_stopping];
+        stop -> stop_sources;
+        stop_sources -> drain;
+        drain -> stop_audio;
+        stop_audio -> finalize;
+        finalize -> stop_phone;
+        stop_phone -> transfer;
+        transfer -> retained;
+    }
+
+    failure [
+        label="IF ANY REQUIRED STEP FAILS\nLog the detailed error • stop phone, audio, and motion work\ndelete incomplete files • show a short status message",
+        shape=box,
+        style="rounded,filled",
+        fillcolor="#FFF0F0",
+        color="#C95A5A",
+        fontcolor="#842929",
+        penwidth=1.5,
+        width=6.2
+    ];
+
+    retained -> failure [style=invis, weight=100];
+}

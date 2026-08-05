@@ -1,0 +1,29 @@
+# Decisions
+
+## 2026-08-05 — Local-only recording never waits for scheduled start
+
+`coordinatesWithPhoneRecording = false` is an immediate local-start policy.
+It skips iPhone preparation and always calculates zero scheduled wait, regardless
+of the configured lead-time value. Apps must still start any required HealthKit
+workout before calling the coordinator; that platform prerequisite is outside
+the package's synchronization policy.
+
+## 2026-08-04 — Split the coordinator at concrete responsibility boundaries
+
+`WatchRecordingCoordinator` remains the stable public facade for both apps.
+Its implementation is divided into public coordination, recording-session
+lifecycle, and ordered Core Motion processing. Live telemetry and optional
+audio use small concrete helpers with no protocol layer.
+
+This is a behavior-preserving organization change: public APIs, binary bytes,
+sensor rates, transfer semantics, and threading order remain unchanged. The
+package deliberately keeps one serial motion pipeline rather than introducing
+multiple actors or services whose synchronization would be harder to audit.
+
+## 2026-08-04 — Keep recording order documented beside the package
+
+The complete startup, active-recording, shutdown, and failure order is maintained
+in `docs/RECORDING_FLOW.md`. Code comments explain ordering constraints and
+threading invariants rather than restating individual Swift expressions. Changes
+to recording order, sensor rates, buffering, or failure cleanup must update the
+flow document in the same change.

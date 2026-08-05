@@ -1,8 +1,14 @@
 import Foundation
 
+/// Live recording commands sent from the Watch to the iPhone.
 public enum RecordingControlAction: String, Codable, Sendable, CaseIterable {
+    /// Ask the phone to start video pre-roll and return a future shared start time.
     case prepare
+
+    /// Mark that Watch motion capture has reached the shared start time.
     case start
+
+    /// Finish the matching iPhone video recording.
     case stop
 }
 
@@ -11,6 +17,7 @@ public enum WatchRecordingCommand {
     public static let retryPendingTransfers = "retryPendingTransfers"
 }
 
+/// Dictionary-compatible WatchConnectivity payload for a recording command.
 public struct RecordingControlMessage: Codable, Sendable, Equatable {
     public static let actionKey = "recordingControl"
     public static let sessionIDKey = "sessionID"
@@ -60,6 +67,7 @@ public struct RecordingControlMessage: Codable, Sendable, Equatable {
     }
 }
 
+/// iPhone reply to `.prepare`, containing the time shared by all session assets.
 public struct ScheduledStartResponse: Codable, Sendable, Equatable {
     public static let plannedStartUnixKey = "plannedStartUnix"
     public static let acceptedKey = "accepted"
@@ -91,6 +99,7 @@ public struct ScheduledStartResponse: Codable, Sendable, Equatable {
     }
 }
 
+/// Timing sidecar created by the iPhone for its video asset.
 public struct PhoneRecordingMetadata: Codable, Sendable, Equatable {
     public let sessionID: String
     public let plannedStartUnix: Double
@@ -116,6 +125,7 @@ public struct PhoneRecordingMetadata: Codable, Sendable, Equatable {
     }
 }
 
+/// Watch sidecar that describes both finalized binary streams and app payloads.
 public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
     public let sessionID: String
     public let plannedStartUnix: Double
