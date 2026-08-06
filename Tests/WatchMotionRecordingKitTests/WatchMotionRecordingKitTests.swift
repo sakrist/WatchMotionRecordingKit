@@ -255,7 +255,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let sessionID = "00112233-4455-6677-8899-aabbccddeeff"
-        let url = directory.appendingPathComponent("recording_\(sessionID).raw-accelerometer.bin")
+        let url = directory.appendingPathComponent("\(sessionID).raw-accelerometer.bin")
         let writer = try WatchMotionBinaryFileWriter(
             stream: .rawAccelerometer,
             fileURL: url,
@@ -288,7 +288,7 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let sessionID = "00112233-4455-6677-8899-aabbccddeeff"
-        let url = directory.appendingPathComponent("recording_\(sessionID).raw-accelerometer.bin")
+        let url = directory.appendingPathComponent("\(sessionID).raw-accelerometer.bin")
         let writer = try WatchMotionBinaryFileWriter(
             stream: .rawAccelerometer,
             fileURL: url,
@@ -459,20 +459,84 @@ final class WatchMotionRecordingKitTests: XCTestCase {
 
     func testAssetNamingRequiresUUIDAcrossBothBinarySuffixesAndMetadata() {
         let sessionID = "00112233-4455-4677-8899-aabbccddeeff"
+        XCTAssertEqual(WatchRecordingAssetNaming.baseName(sessionID: sessionID), sessionID)
+        XCTAssertEqual(
+            RecordingPackageLayout.packageDirectoryName(sessionID: sessionID),
+            "\(sessionID).recording"
+        )
+        XCTAssertEqual(
+            WatchRecordingAssetNaming.sessionID(from: "\(sessionID).device-motion.bin"),
+            sessionID
+        )
+        XCTAssertEqual(
+            WatchRecordingAssetNaming.sessionID(from: "\(sessionID).raw-accelerometer.bin"),
+            sessionID
+        )
+        XCTAssertEqual(
+            WatchRecordingAssetNaming.sessionID(from: "\(sessionID).watch.json"),
+            sessionID
+        )
         XCTAssertEqual(
             WatchRecordingAssetNaming.sessionID(from: "recording_\(sessionID).device-motion.bin"),
             sessionID
         )
+        XCTAssertNil(WatchRecordingAssetNaming.sessionID(from: "abc.device-motion.bin"))
+        XCTAssertNil(WatchRecordingAssetNaming.sessionID(from: "abc.txt"))
+    }
+
+    func testCoreRecordingPackageDiscoversRequiredAssetsAndIgnoresHiddenFiles() throws {
+        let rootURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let sessionID = "00112233-4455-4677-8899-aabbccddeeff"
+        let packageURL = RecordingPackageLayout.packageURL(in: rootURL, sessionID: sessionID)
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+
+        for kind in RecordingPackageAssetKind.allCases where kind.isCoreAsset {
+            let fileURL = RecordingPackageLayout.assetURL(kind, in: packageURL, sessionID: sessionID)
+            XCTAssertTrue(FileManager.default.createFile(atPath: fileURL.path, contents: Data()))
+        }
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: packageURL.appendingPathComponent(".DS_Store").path,
+            contents: Data()
+        ))
+
+        let descriptor = try RecordingPackageDescriptor(
+            packageURL: packageURL,
+            expectedProfile: .core
+        )
+
+        XCTAssertEqual(descriptor.sessionID, sessionID)
+        XCTAssertEqual(descriptor.profile, .core)
+        XCTAssertEqual(descriptor.allAssetURLs.count, 3)
+    }
+
+    func testExtendedRecordingPackageRequiresPhoneMetadataWithVideo() throws {
+        let rootURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let sessionID = "00112233-4455-4677-8899-aabbccddeeff"
+        let packageURL = RecordingPackageLayout.packageURL(in: rootURL, sessionID: sessionID)
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+
+        for kind in RecordingPackageAssetKind.allCases where kind.isCoreAsset || kind == .video {
+            let fileURL = RecordingPackageLayout.assetURL(kind, in: packageURL, sessionID: sessionID)
+            XCTAssertTrue(FileManager.default.createFile(atPath: fileURL.path, contents: Data()))
+        }
+
+        XCTAssertThrowsError(try RecordingPackageDescriptor(packageURL: packageURL)) {
+            XCTAssertEqual($0 as? RecordingPackageError, .videoMetadataRequired)
+        }
+
+        let phoneMetadataURL = RecordingPackageLayout.assetURL(.phoneMetadata, in: packageURL, sessionID: sessionID)
+        XCTAssertTrue(FileManager.default.createFile(atPath: phoneMetadataURL.path, contents: Data()))
+        let descriptor = try RecordingPackageDescriptor(packageURL: packageURL, expectedProfile: .extended)
         XCTAssertEqual(
-            WatchRecordingAssetNaming.sessionID(from: "recording_\(sessionID).raw-accelerometer.bin"),
-            sessionID
+            descriptor.videoURL?.lastPathComponent,
+            RecordingPackageLayout.assetFileName(.video, sessionID: sessionID)
         )
         XCTAssertEqual(
-            WatchRecordingAssetNaming.sessionID(from: "recording_\(sessionID).watch.json"),
-            sessionID
+            descriptor.phoneMetadataURL?.lastPathComponent,
+            RecordingPackageLayout.assetFileName(.phoneMetadata, sessionID: sessionID)
         )
-        XCTAssertNil(WatchRecordingAssetNaming.sessionID(from: "recording_abc.device-motion.bin"))
-        XCTAssertNil(WatchRecordingAssetNaming.sessionID(from: "recording_abc.txt"))
     }
 
     private func rawRecord(timestamp: Int64, x: Double) -> WatchRawAccelerometerBinaryRecord {

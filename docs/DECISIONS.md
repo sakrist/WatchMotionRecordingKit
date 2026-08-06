@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-08-06 — Use the UUID directly as the recording filename stem
+
+New recording assets use `<uuid>.device-motion.bin`,
+`<uuid>.raw-accelerometer.bin`, and the matching sidecars. The package directory
+is `<uuid>.recording`. The filename parser still recognizes the older
+`recording_<uuid>` loose-file form for development recordings, but writers never
+emit that prefix.
+
 ## 2026-08-05 — Local-only recording never waits for scheduled start
 
 `coordinatesWithPhoneRecording = false` is an immediate local-start policy.

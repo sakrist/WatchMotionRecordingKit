@@ -36,13 +36,13 @@ Recording is available only when `CMBatchedSensorManager` supports both device m
 Each successful motion recording produces one logical three-file asset set:
 
 ```text
-recording_<session-id>.device-motion.bin
-recording_<session-id>.raw-accelerometer.bin
-recording_<session-id>.watch.json
+<session-id>.device-motion.bin
+<session-id>.raw-accelerometer.bin
+<session-id>.watch.json
 ```
 
 When `WatchRecordingConfiguration.recordsAudio` is enabled, the same session
-also produces `recording_<session-id>.m4a`. Audio is transferred with the
+also produces `<session-id>.m4a`. Audio is transferred with the
 motion assets but is intentionally not part of the motion sidecar because it
 has no binary sample-count or hash contract in this package.
 
@@ -106,3 +106,14 @@ Non-finite values and timestamp regression fail the active recording.
 - SwiftUI views
 - HealthKit workout management
 - App-specific analysis, persistence, or interface policy
+
+## Recording package
+
+The shared package contract wraps one finalized session in a
+`<uuid>.recording` directory. Its required core files are the two
+binary streams and `<uuid>.watch.json`; audio, video, and
+`<uuid>.phone.json` are optional extensions, with phone metadata
+required whenever video is present. `RecordingPackageLayout` and
+`RecordingPackageDescriptor` provide the canonical names and filesystem shape
+validation. They intentionally do not replace the existing binary readers or
+JSON validators.

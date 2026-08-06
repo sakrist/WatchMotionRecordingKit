@@ -16,7 +16,7 @@ public enum WatchMotionBinaryContract {
 /// Generates and parses the common filenames for one recording session.
 public enum WatchRecordingAssetNaming {
     public static func baseName(sessionID: String) -> String {
-        "recording_\(canonicalSessionID(sessionID))"
+        canonicalSessionID(sessionID)
     }
 
     public static func deviceMotionFileName(sessionID: String) -> String {
@@ -44,7 +44,6 @@ public enum WatchRecordingAssetNaming {
     }
 
     public static func sessionID(from fileName: String) -> String? {
-        guard fileName.hasPrefix("recording_") else { return nil }
         let suffixes = [
             WatchMotionBinaryStream.deviceMotion.fileSuffix,
             WatchMotionBinaryStream.rawAccelerometer.fileSuffix,
@@ -54,7 +53,8 @@ public enum WatchRecordingAssetNaming {
             ".mov",
         ]
         guard let suffix = suffixes.first(where: fileName.hasSuffix) else { return nil }
-        let start = fileName.index(fileName.startIndex, offsetBy: "recording_".count)
+        let prefix = fileName.hasPrefix("recording_") ? "recording_" : ""
+        let start = fileName.index(fileName.startIndex, offsetBy: prefix.count)
         let end = fileName.index(fileName.endIndex, offsetBy: -suffix.count)
         guard start < end else { return nil }
         let candidate = String(fileName[start..<end])
