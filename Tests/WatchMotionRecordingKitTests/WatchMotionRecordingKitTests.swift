@@ -29,6 +29,16 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(delay, 0)
     }
 
+    func testPhoneFallbackIsAnExplicitMotionFirstPolicy() {
+        let defaultConfiguration = WatchRecordingConfiguration()
+        let motionFirstConfiguration = WatchRecordingConfiguration(
+            allowsPhoneRecordingFallback: true
+        )
+
+        XCTAssertFalse(defaultConfiguration.allowsPhoneRecordingFallback)
+        XCTAssertTrue(motionFirstConfiguration.allowsPhoneRecordingFallback)
+    }
+
     func testPhoneCoordinatedRecordingWaitsOnlyForRemainingLeadTime() {
         XCTAssertEqual(
             WatchRecordingStartTiming.scheduledDelay(

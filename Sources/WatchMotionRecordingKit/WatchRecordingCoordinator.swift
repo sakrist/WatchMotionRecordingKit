@@ -21,6 +21,12 @@ public final class WatchRecordingCoordinator: ObservableObject {
     /// `true` after preparation succeeds and until the session stops or fails.
     @Published public internal(set) var isRecording = false
 
+    /// `true` while permissions and capture resources are being prepared.
+    @Published public internal(set) var isPreparing = false
+
+    /// The local wall-clock time at which motion samples began being accepted.
+    @Published public internal(set) var recordingStartedAt: Date?
+
     /// Number of accepted 200 Hz device-motion samples in the current session.
     /// The independent 800 Hz raw-acceleration count is stored in final metadata.
     @Published public internal(set) var sampleCount = 0
@@ -86,6 +92,10 @@ public final class WatchRecordingCoordinator: ObservableObject {
     var currentAudioFileURL: URL?
     var currentSessionID: String?
     var currentWatchMetadata: WatchRecordingMetadata?
+    // Set only after iPhone video preparation accepts this session. Start/stop
+    // controls must use this session state rather than the broader
+    // configuration so a motion-only fallback never sends a late command.
+    var usesPhoneRecording = false
     let audioCapture = WatchAudioCapture()
     // Both streams share one uptime-to-Unix clock projection, but each has its
     // own start gate because their first accepted samples can differ.
@@ -176,10 +186,14 @@ public final class WatchRecordingCoordinator: ObservableObject {
 
         logger.info("Recording start requested")
         isStartingRecording = true
+        isPreparing = true
         Task { [weak self] in
             guard let self else { return }
             await self.startRecordingSession()
-            self.isStartingRecording = false
+            await MainActor.run {
+                self.isStartingRecording = false
+                self.isPreparing = false
+            }
         }
     }
 
@@ -191,9 +205,18 @@ public final class WatchRecordingCoordinator: ObservableObject {
     public func stopRecording() {
         guard isRecording else { return }
 
+        // Stop optional phone video immediately. Motion files still need to drain
+        // and finalize, but that work must not keep the iPhone recording screen
+        // open or extend the video past the user's stop action.
+        if let sessionID = currentSessionID, usesPhoneRecording {
+            transport.sendRecordingControl(action: .stop, sessionID: sessionID)
+            usesPhoneRecording = false
+        }
+
         Task { @MainActor [weak self] in
             self?.isArmed = false
             self?.countdownSecondsRemaining = nil
+            self?.recordingStartedAt = nil
         }
 
         do {
@@ -240,9 +263,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
                 try saveWatchMetadata(to: currentMetadataFileURL, metadata: metadata)
             }
 
-            if configuration.coordinatesWithPhoneRecording {
-                transport.sendRecordingControl(action: .stop, sessionID: sessionID)
-            }
+            usesPhoneRecording = false
             let files = [currentDeviceMotionFileURL, currentRawAccelerometerFileURL, currentMetadataFileURL, currentAudioFileURL].compactMap { $0 }
             logger.info(
                 "Stopping session \(sessionID, privacy: .public). deviceSamples=\(deviceMotionSummary.sampleCount), rawSamples=\(rawAccelerometerSummary.sampleCount), queueing=\(files.map(\.lastPathComponent).joined(separator: ","), privacy: .public)"
@@ -255,6 +276,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
                 guard let self else { return }
                 self.sampleCount = Int(deviceMotionSummary.sampleCount)
                 self.isRecording = false
+                self.recordingStartedAt = nil
                 self.statusMessage = "Stopped (queued motion)"
             }
         } catch {
@@ -265,6 +287,7 @@ public final class WatchRecordingCoordinator: ObservableObject {
                 self.isRecording = false
                 self.isArmed = false
                 self.countdownSecondsRemaining = nil
+                self.recordingStartedAt = nil
                 self.statusMessage = "Failed to finish: \(error.localizedDescription)"
             }
         }

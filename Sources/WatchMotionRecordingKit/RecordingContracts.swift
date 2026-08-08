@@ -2,7 +2,7 @@ import Foundation
 
 /// Live recording commands sent from the Watch to the iPhone.
 public enum RecordingControlAction: String, Codable, Sendable, CaseIterable {
-    /// Ask the phone to start video pre-roll and return a future shared start time.
+    /// Ask the phone to reserve a video session and return a shared start time.
     case prepare
 
     /// Mark that Watch motion capture has reached the shared start time.

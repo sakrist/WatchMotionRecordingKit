@@ -6,14 +6,20 @@ import Foundation
 /// Sensor rates are intentionally not configurable: supported recordings always
 /// request native 200 Hz device motion and 800 Hz raw acceleration.
 public struct WatchRecordingConfiguration: Sendable, Equatable {
-    /// Seconds reserved for phone video pre-roll and Watch preparation.
+    /// Seconds reserved for phone video coordination and Watch preparation.
     public let scheduledLeadTime: TimeInterval
 
     /// Maximum decimated points retained for the optional live Watch graph.
     public let maxHistorySamples: Int
 
-    /// Whether starting and stopping must be coordinated with iPhone video.
+    /// Whether this recording should try to coordinate with iPhone video.
     public let coordinatesWithPhoneRecording: Bool
+
+    /// Whether motion may start locally if optional iPhone video cannot prepare.
+    ///
+    /// Keep this `false` for clients that require a synchronized video asset.
+    /// Debug and motion-first clients can opt in to a resilient motion-only start.
+    public let allowsPhoneRecordingFallback: Bool
 
     /// Whether the Watch also creates a microphone recording for the session.
     public let recordsAudio: Bool
@@ -32,6 +38,7 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
         scheduledLeadTime: TimeInterval = 2.0,
         maxHistorySamples: Int = 75,
         coordinatesWithPhoneRecording: Bool = true,
+        allowsPhoneRecordingFallback: Bool = false,
         recordsAudio: Bool = false,
         fileWriteBatchInterval: TimeInterval = 1,
         fileSynchronizationInterval: TimeInterval = 60,
@@ -40,6 +47,7 @@ public struct WatchRecordingConfiguration: Sendable, Equatable {
         self.scheduledLeadTime = scheduledLeadTime
         self.maxHistorySamples = maxHistorySamples
         self.coordinatesWithPhoneRecording = coordinatesWithPhoneRecording
+        self.allowsPhoneRecordingFallback = allowsPhoneRecordingFallback
         self.recordsAudio = recordsAudio
         self.fileWriteBatchInterval = fileWriteBatchInterval
         self.fileSynchronizationInterval = fileSynchronizationInterval

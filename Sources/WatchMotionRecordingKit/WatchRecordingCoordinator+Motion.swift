@@ -445,11 +445,12 @@ extension WatchRecordingCoordinator {
         motionStartupTimeoutTask = nil
         DispatchQueue.main.async {
             guard self.isRecording, self.currentSessionID == sessionID else { return }
-            if self.configuration.coordinatesWithPhoneRecording {
+            if self.usesPhoneRecording {
                 self.logger.info("Stopping iPhone video after motion capture failure. session=\(sessionID, privacy: .public)")
                 self.transport.sendRecordingControl(action: .stop, sessionID: sessionID)
             }
             self.isRecording = false
+            self.recordingStartedAt = nil
             self.cleanupIncompleteSession()
             self.setStatus("Motion error: \(error.localizedDescription)")
         }

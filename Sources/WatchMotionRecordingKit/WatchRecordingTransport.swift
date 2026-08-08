@@ -25,7 +25,7 @@ public protocol WatchRecordingTransport: AnyObject {
     /// Sends an immediate start or stop marker to the reachable iPhone app.
     func sendRecordingControl(action: RecordingControlAction, sessionID: String)
 
-    /// Asks the iPhone to begin video pre-roll and choose a shared future start.
+    /// Asks the iPhone to reserve video and choose a shared start time.
     func requestScheduledStart(sessionID: String, leadTime: TimeInterval) async -> ScheduledStartResponse?
 }
 
@@ -109,8 +109,9 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
 
     /// Sends `.prepare` and waits for the iPhone's acceptance and planned start time.
     ///
-    /// An accepted reply means the phone has started video pre-roll. A missing or
-    /// rejected reply prevents the Watch session when synchronized video is required.
+    /// An accepted reply means the phone is ready to start video when the Watch
+    /// sends `.start`. A missing or rejected reply prevents the Watch session
+    /// when synchronized video is required.
     public func requestScheduledStart(sessionID: String, leadTime: TimeInterval) async -> ScheduledStartResponse? {
         guard WCSession.isSupported() else {
             logger.error("Cannot prepare iPhone video; WatchConnectivity is unsupported. session=\(sessionID, privacy: .public)")
@@ -130,13 +131,13 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
                 leadTime: leadTime
             )
 
-            self.logger.info("Requesting iPhone video pre-roll. session=\(sessionID, privacy: .public) leadTime=\(leadTime, privacy: .public)s")
+            self.logger.info("Requesting iPhone video prepare. session=\(sessionID, privacy: .public) leadTime=\(leadTime, privacy: .public)s")
             session.sendMessage(message.dictionaryRepresentation, replyHandler: { reply in
                 let response = ScheduledStartResponse(dictionary: reply)
-                self.logger.info("Received iPhone video pre-roll reply. session=\(sessionID, privacy: .public) accepted=\(response?.accepted ?? false, privacy: .public)")
+                self.logger.info("Received iPhone video prepare reply. session=\(sessionID, privacy: .public) accepted=\(response?.accepted ?? false, privacy: .public)")
                 continuation.resume(returning: response)
             }, errorHandler: { error in
-                self.logger.error("iPhone video pre-roll request failed. session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                self.logger.error("iPhone video prepare request failed. session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 continuation.resume(returning: nil)
             })
         }
