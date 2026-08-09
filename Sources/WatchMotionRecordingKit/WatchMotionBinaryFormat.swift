@@ -718,7 +718,11 @@ public enum WatchMotionFileIntegrity {
         while let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
             hasher.update(data: data)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return sha256Hex(digest: hasher.finalize())
+    }
+
+    public static func sha256Hex(digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 
