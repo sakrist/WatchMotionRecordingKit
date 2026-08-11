@@ -1,10 +1,17 @@
 # Decisions
 
+## 2026-08-09 — Use `.mmrec` for recording package directories
+
+The canonical package directory is `<uuid>.mmrec`. The extension is a
+container-level identifier only; the binary and JSON contracts are unchanged.
+The shared descriptor accepts `.mmrec` and rejects the previous `.recording`
+package name.
+
 ## 2026-08-06 — Use the UUID directly as the recording filename stem
 
 New recording assets use `<uuid>.device-motion.bin`,
 `<uuid>.raw-accelerometer.bin`, and the matching sidecars. The package directory
-is `<uuid>.recording`. The filename parser still recognizes the older
+is `<uuid>.mmrec`. The filename parser still recognizes the older
 `recording_<uuid>` loose-file form for development recordings, but writers never
 emit that prefix.
 

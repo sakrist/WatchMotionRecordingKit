@@ -472,7 +472,10 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(WatchRecordingAssetNaming.baseName(sessionID: sessionID), sessionID)
         XCTAssertEqual(
             RecordingPackageLayout.packageDirectoryName(sessionID: sessionID),
-            "\(sessionID).recording"
+            "\(sessionID).mmrec"
+        )
+        XCTAssertNil(
+            RecordingPackageLayout.sessionID(fromPackageDirectoryName: "\(sessionID).recording")
         )
         XCTAssertEqual(
             WatchRecordingAssetNaming.sessionID(from: "\(sessionID).device-motion.bin"),

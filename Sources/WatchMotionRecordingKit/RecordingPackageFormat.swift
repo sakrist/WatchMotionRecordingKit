@@ -61,7 +61,7 @@ public enum RecordingPackageError: Error, Equatable, LocalizedError, Sendable {
 
 /// Canonical names and paths for one folder-based recording package.
 public enum RecordingPackageLayout {
-    public static let packageSuffix = ".recording"
+    public static let packageSuffix = ".mmrec"
 
     public static func packageDirectoryName(sessionID: String) -> String {
         WatchRecordingAssetNaming.baseName(sessionID: sessionID) + packageSuffix

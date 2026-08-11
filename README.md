@@ -110,7 +110,7 @@ Non-finite values and timestamp regression fail the active recording.
 ## Recording package
 
 The shared package contract wraps one finalized session in a
-`<uuid>.recording` directory. Its required core files are the two
+`<uuid>.mmrec` directory. Its required core files are the two
 binary streams and `<uuid>.watch.json`; audio, video, and
 `<uuid>.phone.json` are optional extensions, with phone metadata
 required whenever video is present. `RecordingPackageLayout` and
