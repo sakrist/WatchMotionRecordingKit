@@ -59,6 +59,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
     /// Number of completed sessions that still have files awaiting transfer.
     @Published public internal(set) var pendingSyncSessionCount = 0
 
+    /// `true` while WatchConnectivity has recording files queued for delivery.
+    @Published public internal(set) var isSyncing = false
+
     // MARK: - Dependencies
 
     let configuration: WatchRecordingConfiguration
@@ -137,12 +140,14 @@ public final class WatchRecordingCoordinator: ObservableObject {
         self.liveTelemetry = WatchLiveTelemetryBuffer(
             maximumPointCount: configuration.maxHistorySamples
         )
-        self.transport.fileTransferCompletionHandler = { [weak self] _, error in
+        self.transport.fileTransferCompletionHandler = { [weak self] _, error, remainingTransferCount in
             guard let self else { return }
             if error == nil {
                 WatchPendingRecordingStore.trimStoredSessions(retainingLast: self.configuration.retainedSessionLimit)
             }
-            self.refreshPendingSyncSessionCount()
+            self.refreshPendingSyncSessionCount(
+                outstandingFileTransferCount: remainingTransferCount
+            )
         }
         self.transport.pendingTransferRetryRequestHandler = { [weak self] in
             self?.retryPendingRecordingTransfers()
@@ -350,12 +355,18 @@ public final class WatchRecordingCoordinator: ObservableObject {
     // MARK: - Pending Transfers
 
     /// Recounts locally retained sessions that still contain untransferred files.
-    public func refreshPendingSyncSessionCount() {
+    public func refreshPendingSyncSessionCount(outstandingFileTransferCount: Int? = nil) {
         let count = WatchPendingRecordingStore.pendingSessions().count
+        let transferCount = outstandingFileTransferCount ?? transport.outstandingFileTransferCount
+        let isSyncing = transferCount > 0
         if Thread.isMainThread {
             pendingSyncSessionCount = count
+            self.isSyncing = isSyncing
         } else {
-            DispatchQueue.main.async { self.pendingSyncSessionCount = count }
+            DispatchQueue.main.async {
+                self.pendingSyncSessionCount = count
+                self.isSyncing = isSyncing
+            }
         }
     }
 

@@ -37,6 +37,15 @@ arrive before the planned start are processed but rejected by the start gates.
 | Binary writers | Store every accepted motion sample and finalize counts and hashes. |
 | WatchConnectivity transport | Queues completed files and marks each local file as synchronized after transfer succeeds. |
 
+The coordinator reports synchronization while WatchConnectivity has outstanding
+recording files. It separately reports how many retained sessions still have at
+least one unsynchronized asset. The Watch app publishes both values in its latest
+application context so the iPhone can show useful transfer state even when
+immediate-message reachability is false.
+When a transfer completion callback runs, the completed item can still appear in
+WatchConnectivity's outstanding list. The transport excludes that item from the
+remaining count so the last completed file clears synchronization state.
+
 ## Timing Details That Matter
 
 - Device motion is sampled at 200 Hz. It contains user acceleration, rotation

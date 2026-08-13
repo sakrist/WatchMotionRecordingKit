@@ -3,6 +3,42 @@ import XCTest
 @testable import WatchMotionRecordingKit
 
 final class WatchMotionRecordingKitTests: XCTestCase {
+    @MainActor
+    func testFinalTransferCompletionClearsSyncingState() {
+        let transport = FinalTransferTestTransport(outstandingFileTransferCount: 1)
+        let coordinator = WatchRecordingCoordinator(transport: transport)
+
+        XCTAssertTrue(coordinator.isSyncing)
+
+        transport.completeFinalTransfer()
+
+        XCTAssertFalse(coordinator.isSyncing)
+    }
+
+    func testWatchRecordingStateContextRoundTripsTransferState() throws {
+        let state = WatchRecordingStateContext(
+            isRecording: false,
+            isSyncing: true,
+            pendingSyncSessionCount: 2
+        )
+
+        let decoded = try XCTUnwrap(
+            WatchRecordingStateContext(dictionary: state.dictionaryRepresentation)
+        )
+
+        XCTAssertEqual(decoded, state)
+    }
+
+    func testWatchRecordingStateContextReadsOlderRecordingOnlyPayload() throws {
+        let decoded = try XCTUnwrap(WatchRecordingStateContext(dictionary: [
+            WatchRecordingStateContext.isRecordingKey: true,
+        ]))
+
+        XCTAssertTrue(decoded.isRecording)
+        XCTAssertFalse(decoded.isSyncing)
+        XCTAssertEqual(decoded.pendingSyncSessionCount, 0)
+    }
+
     func testRecordingControlMessageRoundTripsThroughDictionary() {
         let message = RecordingControlMessage(
             action: .prepare,
@@ -585,5 +621,41 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             .appendingPathComponent("WatchMotionRecordingKitTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+}
+
+private final class FinalTransferTestTransport: WatchRecordingTransport {
+    var fileTransferCompletionHandler: ((URL, Error?, Int) -> Void)?
+    var pendingTransferRetryRequestHandler: (() -> Void)?
+    private(set) var outstandingFileTransferCount: Int
+
+    init(outstandingFileTransferCount: Int) {
+        self.outstandingFileTransferCount = outstandingFileTransferCount
+    }
+
+    func activate() {}
+
+    func cancelOutstandingFileTransfers() {
+        outstandingFileTransferCount = 0
+    }
+
+    func transferRecordingFiles(sessionID: String, fileURLs: [URL]) {}
+
+    func sendRecordingControl(action: RecordingControlAction, sessionID: String) {}
+
+    func requestScheduledStart(
+        sessionID: String,
+        leadTime: TimeInterval
+    ) async -> ScheduledStartResponse? {
+        nil
+    }
+
+    func completeFinalTransfer() {
+        outstandingFileTransferCount = 0
+        fileTransferCompletionHandler?(
+            URL(fileURLWithPath: "/tmp/completed-watch-recording.bin"),
+            nil,
+            0
+        )
     }
 }

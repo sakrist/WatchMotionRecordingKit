@@ -8,10 +8,14 @@ import WatchConnectivity
 /// behind a larger service hierarchy.
 public protocol WatchRecordingTransport: AnyObject {
     /// Called once WatchConnectivity finishes attempting one file transfer.
-    var fileTransferCompletionHandler: ((URL, Error?) -> Void)? { get set }
+    /// The final argument is the number of transfers remaining after this one.
+    var fileTransferCompletionHandler: ((URL, Error?, Int) -> Void)? { get set }
 
     /// Called when the phone asks the Watch to retry locally retained files.
     var pendingTransferRetryRequestHandler: (() -> Void)? { get set }
+
+    /// Number of recording files currently queued with WatchConnectivity.
+    var outstandingFileTransferCount: Int { get }
 
     /// Activates the underlying communication session.
     func activate()
@@ -34,12 +38,17 @@ public protocol WatchRecordingTransport: AnyObject {
 /// Control messages require the iPhone to be reachable. Completed file transfer
 /// uses WatchConnectivity's queued background mechanism and can finish later.
 public final class WatchConnectivityRecordingTransport: NSObject, WatchRecordingTransport, WCSessionDelegate {
-    public var fileTransferCompletionHandler: ((URL, Error?) -> Void)?
+    public var fileTransferCompletionHandler: ((URL, Error?, Int) -> Void)?
     public var pendingTransferRetryRequestHandler: (() -> Void)?
     private let logger = Logger(subsystem: "com.sakrist.WatchMotionRecordingKit", category: "WatchTransfer")
 
     public override init() {
         super.init()
+    }
+
+    public var outstandingFileTransferCount: Int {
+        guard WCSession.isSupported() else { return 0 }
+        return WCSession.default.outstandingFileTransfers.count
     }
 
     public func activate() {
@@ -162,6 +171,11 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
         error: Error?
     ) {
         let fileURL = fileTransfer.file.fileURL
+        let remainingTransferCount = session.outstandingFileTransfers.reduce(into: 0) { count, transfer in
+            if transfer !== fileTransfer {
+                count += 1
+            }
+        }
 
         if error == nil {
             WatchPendingRecordingStore.markFileSynced(fileURL)
@@ -170,7 +184,7 @@ public final class WatchConnectivityRecordingTransport: NSObject, WatchRecording
             logger.error("File transfer failed for \(fileURL.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
 
-        fileTransferCompletionHandler?(fileURL, error)
+        fileTransferCompletionHandler?(fileURL, error, remainingTransferCount)
     }
 
     public func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {

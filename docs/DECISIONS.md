@@ -1,5 +1,16 @@
 # Decisions
 
+## 2026-08-13 — Publish queued transfer state separately from pending sessions
+
+The coordinator exposes `isSyncing` from WatchConnectivity's outstanding file
+queue and retains `pendingSyncSessionCount` as the count of locally stored
+sessions missing at least one success marker. The Watch UI distinguishes active
+sync from waiting files and publishes both values with recording state through
+application context. This is coarse state, not byte-level progress.
+The completion callback supplies the remaining queue count with the completed
+transfer excluded because the outstanding list can still contain it during the
+delegate callback. The final file therefore clears active sync immediately.
+
 ## 2026-08-09 — Use `.mmrec` for recording package directories
 
 The canonical package directory is `<uuid>.mmrec`. The extension is a

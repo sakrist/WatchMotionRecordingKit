@@ -17,6 +17,43 @@ public enum WatchRecordingCommand {
     public static let retryPendingTransfers = "retryPendingTransfers"
 }
 
+/// Latest Watch state shared with the iPhone through application context.
+public struct WatchRecordingStateContext: Sendable, Equatable {
+    public static let isRecordingKey = "isRecording"
+    public static let isSyncingKey = "isSyncing"
+    public static let pendingSyncSessionCountKey = "pendingSyncSessionCount"
+
+    public let isRecording: Bool
+    public let isSyncing: Bool
+    public let pendingSyncSessionCount: Int
+
+    public init(isRecording: Bool, isSyncing: Bool, pendingSyncSessionCount: Int) {
+        self.isRecording = isRecording
+        self.isSyncing = isSyncing
+        self.pendingSyncSessionCount = max(pendingSyncSessionCount, 0)
+    }
+
+    public init?(dictionary: [String: Any]) {
+        guard let isRecording = dictionary[Self.isRecordingKey] as? Bool else {
+            return nil
+        }
+
+        self.init(
+            isRecording: isRecording,
+            isSyncing: dictionary[Self.isSyncingKey] as? Bool ?? false,
+            pendingSyncSessionCount: dictionary[Self.pendingSyncSessionCountKey] as? Int ?? 0
+        )
+    }
+
+    public var dictionaryRepresentation: [String: Any] {
+        [
+            Self.isRecordingKey: isRecording,
+            Self.isSyncingKey: isSyncing,
+            Self.pendingSyncSessionCountKey: pendingSyncSessionCount,
+        ]
+    }
+}
+
 /// Dictionary-compatible WatchConnectivity payload for a recording command.
 public struct RecordingControlMessage: Codable, Sendable, Equatable {
     public static let actionKey = "recordingControl"
