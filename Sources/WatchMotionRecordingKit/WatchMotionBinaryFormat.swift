@@ -53,11 +53,7 @@ public enum WatchRecordingAssetNaming {
             ".mov",
         ]
         guard let suffix = suffixes.first(where: fileName.hasSuffix) else { return nil }
-        let prefix = fileName.hasPrefix("recording_") ? "recording_" : ""
-        let start = fileName.index(fileName.startIndex, offsetBy: prefix.count)
-        let end = fileName.index(fileName.endIndex, offsetBy: -suffix.count)
-        guard start < end else { return nil }
-        let candidate = String(fileName[start..<end])
+        let candidate = String(fileName.dropLast(suffix.count))
         guard let identifier = UUID(uuidString: candidate) else { return nil }
         return identifier.uuidString.lowercased()
     }

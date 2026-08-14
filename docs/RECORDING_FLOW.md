@@ -13,6 +13,10 @@ package begins; the workout must already be running when the Watch calls
 4. On Stop, stop the sensors first and finish processing everything already received.
 5. Finalize and validate the files, then queue them for background transfer.
 
+If Stop arrives while preparation or the scheduled countdown is still active,
+the coordinator cancels that startup instead. It stops any resources already
+created, removes the incomplete files, and never queues that session.
+
 ## Complete Order
 
 ![Recording flow from Start through transfer, including failure cleanup](recording-flow.png)
@@ -31,6 +35,7 @@ arrive before the planned start are processed but rejected by the start gates.
 |---|---|
 | Watch app | Starts the HealthKit workout, displays status, and calls start or stop. |
 | `WatchRecordingCoordinator` | Owns the overall recording state and enforces the order shown above. |
+| Recording lifecycle | Accepts only session-matched start, cancellation, recording, stop, and failure transitions. |
 | Session lifecycle extension | Creates files, coordinates the optional iPhone video, starts audio and motion, and cleans up failures. |
 | Motion extension | Receives both sensor streams and processes every batch on one serial queue. |
 | iPhone app | Optionally starts video pre-roll, records against the shared session ID, and stops on Watch command. |
@@ -77,6 +82,13 @@ encoding, or writing fails, the coordinator logs the detailed error, stops all
 started resources, removes the incomplete files, and does not queue that session
 for transfer.
 
+Every startup and non-idle lifecycle phase carries its session UUID. After any
+asynchronous permission, phone, or countdown wait, startup continues only when
+that UUID is still the active starting session. Stop invalidates the startup
+before cleanup, so a delayed reply or cancelled task cannot restart capture or
+clean up files belonging to a newer session. Core Motion is installed before the
+coordinator publishes the session as recording.
+
 ## Small Glossary
 
 - **Hz** means samples per second. 200 Hz is 200 samples each second.
@@ -91,6 +103,7 @@ for transfer.
 | File | Read it for |
 |---|---|
 | [`WatchRecordingCoordinator.swift`](../Sources/WatchMotionRecordingKit/WatchRecordingCoordinator.swift) | Public start/stop API, visible state, metadata updates, and transfer commands. |
+| [`WatchRecordingLifecycle.swift`](../Sources/WatchMotionRecordingKit/WatchRecordingLifecycle.swift) | Session-checked lifecycle transitions and Stop behavior. |
 | [`WatchRecordingCoordinator+Session.swift`](../Sources/WatchMotionRecordingKit/WatchRecordingCoordinator%2BSession.swift) | Steps 3–10 and failure cleanup. |
 | [`WatchRecordingCoordinator+Motion.swift`](../Sources/WatchMotionRecordingKit/WatchRecordingCoordinator%2BMotion.swift) | Steps 8–17: sensor callbacks, timestamping, buffering, and draining. |
 | [`WatchLiveTelemetry.swift`](../Sources/WatchMotionRecordingKit/WatchLiveTelemetry.swift) | Watch UI throttling and graph decimation. |

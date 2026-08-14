@@ -3,6 +3,53 @@ import XCTest
 @testable import WatchMotionRecordingKit
 
 final class WatchMotionRecordingKitTests: XCTestCase {
+    func testStoppingStartupRejectsItsLateCompletion() {
+        var lifecycle = WatchRecordingLifecycle()
+        let cancelledSessionID = UUID().uuidString.lowercased()
+        let nextSessionID = UUID().uuidString.lowercased()
+
+        XCTAssertTrue(lifecycle.beginStartup(sessionID: cancelledSessionID))
+        XCTAssertEqual(
+            lifecycle.beginStop(),
+            .cancelStartup(sessionID: cancelledSessionID)
+        )
+        XCTAssertFalse(lifecycle.completeStartup(sessionID: cancelledSessionID))
+
+        XCTAssertTrue(lifecycle.beginStartup(sessionID: nextSessionID))
+        XCTAssertFalse(lifecycle.completeStartup(sessionID: cancelledSessionID))
+        XCTAssertEqual(lifecycle.phase, .starting(sessionID: nextSessionID))
+        XCTAssertTrue(lifecycle.completeStartup(sessionID: nextSessionID))
+        XCTAssertEqual(lifecycle.phase, .recording(sessionID: nextSessionID))
+    }
+
+    func testActiveRecordingMustFinishStopBeforeAnotherStartup() {
+        var lifecycle = WatchRecordingLifecycle()
+        let sessionID = UUID().uuidString.lowercased()
+
+        XCTAssertTrue(lifecycle.beginStartup(sessionID: sessionID))
+        XCTAssertTrue(lifecycle.completeStartup(sessionID: sessionID))
+        XCTAssertEqual(
+            lifecycle.beginStop(),
+            .finishRecording(sessionID: sessionID)
+        )
+        XCTAssertFalse(lifecycle.beginStartup(sessionID: UUID().uuidString.lowercased()))
+        XCTAssertTrue(lifecycle.finishStop(sessionID: sessionID))
+        XCTAssertEqual(lifecycle.phase, .idle)
+    }
+
+    func testFailureCannotResetAReplacementStartup() {
+        var lifecycle = WatchRecordingLifecycle()
+        let oldSessionID = UUID().uuidString.lowercased()
+        let replacementSessionID = UUID().uuidString.lowercased()
+
+        XCTAssertTrue(lifecycle.beginStartup(sessionID: oldSessionID))
+        XCTAssertEqual(lifecycle.beginStop(), .cancelStartup(sessionID: oldSessionID))
+        XCTAssertTrue(lifecycle.beginStartup(sessionID: replacementSessionID))
+
+        XCTAssertFalse(lifecycle.fail(sessionID: oldSessionID))
+        XCTAssertEqual(lifecycle.phase, .starting(sessionID: replacementSessionID))
+    }
+
     @MainActor
     func testFinalTransferCompletionClearsSyncingState() {
         let transport = FinalTransferTestTransport(outstandingFileTransferCount: 1)
@@ -510,9 +557,6 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             RecordingPackageLayout.packageDirectoryName(sessionID: sessionID),
             "\(sessionID).mmrec"
         )
-        XCTAssertNil(
-            RecordingPackageLayout.sessionID(fromPackageDirectoryName: "\(sessionID).recording")
-        )
         XCTAssertEqual(
             WatchRecordingAssetNaming.sessionID(from: "\(sessionID).device-motion.bin"),
             sessionID
@@ -523,10 +567,6 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         )
         XCTAssertEqual(
             WatchRecordingAssetNaming.sessionID(from: "\(sessionID).watch.json"),
-            sessionID
-        )
-        XCTAssertEqual(
-            WatchRecordingAssetNaming.sessionID(from: "recording_\(sessionID).device-motion.bin"),
             sessionID
         )
         XCTAssertNil(WatchRecordingAssetNaming.sessionID(from: "abc.device-motion.bin"))

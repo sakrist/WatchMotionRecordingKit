@@ -12,8 +12,22 @@ extension WatchRecordingCoordinator {
     /// The iPhone is prepared before motion capture starts. Once the phone returns
     /// a planned Unix time, Watch motion gates and optional audio use that same
     /// time so independently captured assets can be aligned during analysis.
-    func startRecordingSession() async {
-        let sessionID = Self.makeSessionID()
+    @MainActor
+    func startRecordingSession(sessionID: String) async {
+        defer { finishStartupTask(sessionID: sessionID) }
+        guard shouldContinueStartup(sessionID: sessionID) else { return }
+
+        // Discard references to the previous completed session without deleting
+        // its retained files. New failures may then clean up only this session.
+        deviceMotionWriter = nil
+        rawAccelerometerWriter = nil
+        currentDeviceMotionFileURL = nil
+        currentRawAccelerometerFileURL = nil
+        currentMetadataFileURL = nil
+        currentAudioFileURL = nil
+        currentWatchMetadata = nil
+        currentSessionID = sessionID
+        usesPhoneRecording = false
         let preparationStartedUptime = ProcessInfo.processInfo.systemUptime
 
         do {
@@ -22,6 +36,7 @@ extension WatchRecordingCoordinator {
             let shouldRecordAudio: Bool
             if configuration.recordsAudio {
                 shouldRecordAudio = await audioCapture.requestPermission()
+                guard shouldContinueStartup(sessionID: sessionID) else { return }
                 if !shouldRecordAudio {
                     logger.warning("Watch microphone permission is unavailable; continuing without audio. session=\(sessionID, privacy: .public)")
                 }
@@ -56,12 +71,7 @@ extension WatchRecordingCoordinator {
             currentRawAccelerometerFileURL = rawAccelerometerURL
             currentMetadataFileURL = metadataURL
             currentAudioFileURL = audioURL
-            currentSessionID = sessionID
-            usesPhoneRecording = false
-            await MainActor.run {
-                self.resetPublishedSamples()
-                self.currentFileName = WatchRecordingAssetNaming.baseName(sessionID: sessionID)
-            }
+            resetPublishedSamples()
 
             // A prepare request reserves the iPhone video session and returns the
             // shared start time. Motion-first clients may fall back immediately
@@ -72,6 +82,12 @@ extension WatchRecordingCoordinator {
                     sessionID: sessionID,
                     leadTime: configuration.scheduledLeadTime
                 )
+                guard shouldContinueStartup(sessionID: sessionID) else {
+                    if response?.accepted == true {
+                        transport.sendRecordingControl(action: .stop, sessionID: sessionID)
+                    }
+                    return
+                }
                 if let response, response.accepted {
                     usesPhoneRecording = true
                     scheduledStart = response
@@ -124,11 +140,6 @@ extension WatchRecordingCoordinator {
                 }
             }
 
-            // Motion callbacks may publish telemetry immediately. Mark the session
-            // active first so those valid callbacks are not rejected as stale.
-            await MainActor.run {
-                self.isRecording = true
-            }
             let preparationMilliseconds = Int(
                 (ProcessInfo.processInfo.systemUptime - preparationStartedUptime) * 1_000
             )
@@ -136,6 +147,9 @@ extension WatchRecordingCoordinator {
             let frequencies = try startMotionCapture(sessionID: sessionID)
             actualDeviceMotionFrequency = frequencies.deviceMotion
             actualRawAccelerometerFrequency = frequencies.rawAccelerometer
+            guard shouldContinueStartup(sessionID: sessionID) else { return }
+            // Publish recording only after both Core Motion sources are installed.
+            isRecording = true
 
             // Core Motion starts before the deadline to prove both streams work.
             // Their start gates discard any samples captured during this countdown.
@@ -145,28 +159,28 @@ extension WatchRecordingCoordinator {
                 nowUnix: Date().timeIntervalSince1970
             )
             if scheduledDelay > 0 {
-                await MainActor.run {
-                    self.isArmed = true
-                    self.statusMessage = "Armed, starting soon"
-                }
+                isArmed = true
+                statusMessage = "Armed, starting soon"
                 startCountdown(to: plannedStartUnix)
-                try? await Task.sleep(nanoseconds: UInt64(scheduledDelay * 1_000_000_000))
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(scheduledDelay * 1_000_000_000))
+                } catch {
+                    return
+                }
             }
-            guard await MainActor.run(body: { self.isRecording }), currentSessionID == sessionID else { return }
-            await MainActor.run {
-                self.isArmed = false
-                self.countdownSecondsRemaining = nil
-                self.recordingStartedAt = Date()
-            }
+            guard shouldContinueStartup(sessionID: sessionID), isRecording else { return }
+            guard recordingLifecycle.completeStartup(sessionID: sessionID) else { return }
+            isArmed = false
+            countdownSecondsRemaining = nil
+            recordingStartedAt = Date()
             // This message starts the matching phone movie and marks that the
             // Watch reached the shared start and is safe to treat as active.
             if usesPhoneRecording {
                 transport.sendRecordingControl(action: .start, sessionID: sessionID)
             }
-            await MainActor.run {
-                self.statusMessage = "Recording motion"
-            }
+            statusMessage = "Recording motion"
         } catch {
+            guard recordingLifecycle.fail(sessionID: sessionID) else { return }
             logger.error("Recording start failed. session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             if usesPhoneRecording {
                 logger.info("Stopping prepared iPhone video session after Watch startup failure. session=\(sessionID, privacy: .public)")
@@ -175,19 +189,18 @@ extension WatchRecordingCoordinator {
             // Startup is all-or-nothing. Never leave a partial session available
             // for transfer or analysis.
             cleanupIncompleteSession()
-            await MainActor.run {
-                self.isRecording = false
-                self.isArmed = false
-                self.countdownSecondsRemaining = nil
-                self.recordingStartedAt = nil
-                self.statusMessage = error.localizedDescription
-            }
+            isRecording = false
+            isArmed = false
+            countdownSecondsRemaining = nil
+            recordingStartedAt = nil
+            statusMessage = error.localizedDescription
         }
     }
 
     // MARK: - Session State and Files
 
     /// Clears values from the previous session before the new session is shown.
+    @MainActor
     private func resetPublishedSamples() {
         sampleCount = 0
         latestAccelMagnitude = 0
@@ -235,19 +248,23 @@ extension WatchRecordingCoordinator {
     }
 
     /// Publishes a lightweight countdown without blocking the main thread.
+    @MainActor
     private func startCountdown(to plannedStartUnix: Double) {
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            while await MainActor.run(body: { self.isArmed }) {
+            while self.isArmed {
                 let remaining = max(0, plannedStartUnix - Date().timeIntervalSince1970)
-                await MainActor.run { self.countdownSecondsRemaining = remaining }
+                self.countdownSecondsRemaining = remaining
                 if remaining <= 0.05 { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            await MainActor.run {
-                if self.isArmed { self.countdownSecondsRemaining = 0 }
-            }
+            if self.isArmed { self.countdownSecondsRemaining = 0 }
         }
+    }
+
+    @MainActor
+    private func shouldContinueStartup(sessionID: String) -> Bool {
+        !Task.isCancelled && recordingLifecycle.isStarting(sessionID: sessionID)
     }
 
     // MARK: - Cleanup
@@ -256,6 +273,7 @@ extension WatchRecordingCoordinator {
     ///
     /// This method is intentionally safe to call after partial startup: each stop,
     /// reset, and file deletion tolerates resources that were never created.
+    @MainActor
     func cleanupIncompleteSession() {
         motionStartupTimeoutTask?.cancel()
         motionStartupTimeoutTask = nil
@@ -294,7 +312,7 @@ extension WatchRecordingCoordinator {
     }
 
     /// Creates the identity shared by every Watch and iPhone asset in one session.
-    private static func makeSessionID() -> String {
+    static func makeSessionID() -> String {
         UUID().uuidString.lowercased()
     }
 }

@@ -19,7 +19,8 @@ including an ordered flow diagram, see [Recording Flow](docs/RECORDING_FLOW.md).
 ## Internal Structure
 
 `WatchRecordingCoordinator` is the public facade used by app code. It owns
-published state, start/stop intent, and transfer commands. Session setup and
+published state, session-checked start/stop lifecycle, and transfer commands.
+Session setup and
 cleanup live in a focused coordinator extension, while Core Motion callbacks,
 startup validation, timestamp gating, and ordered writes stay together in the
 motion-capture extension so their sequencing remains visible in one place.
@@ -28,6 +29,10 @@ Live graph decimation is owned by a small value-type buffer and optional audio
 capture is owned by a dedicated helper. These are concrete internal types, not
 public protocols. The split keeps the shared API stable and leaves room to
 replace one capability without turning the package into a framework hierarchy.
+
+The lifecycle has explicit idle, starting, recording, and stopping phases. Each
+non-idle phase carries its session UUID so a cancelled startup cannot resume and
+alter resources belonging to a later recording.
 
 ## Capture Contract
 

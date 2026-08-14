@@ -1,5 +1,24 @@
 # Decisions
 
+## 2026-08-14 — Identify and cancel recording startup by session
+
+Watch recording lifecycle uses explicit idle, starting, recording, and stopping
+phases, with the session UUID carried by every non-idle phase. Public start/stop
+operations and asynchronous session setup transition that state on the main
+actor. Stop during startup invalidates and cancels the task before stopping
+resources and removing incomplete files; normal drain, finalization, and transfer
+begin only after startup reaches recording.
+
+Task cancellation is not treated as the sole safety boundary because microphone
+and WatchConnectivity callbacks can resume later. Every suspended startup step
+also validates its session UUID, and an accepted phone-prepare reply received
+after cancellation is balanced with a stop command. This prevents stale work from
+starting sensors or cleaning up a replacement session.
+
+The unreleased package also removes workspace-unused recording-name state,
+legacy start/stop aliases, the single-stream timing convenience wrapper, and
+unreachable internal capture errors instead of maintaining compatibility code.
+
 ## 2026-08-13 — Publish queued transfer state separately from pending sessions
 
 The coordinator exposes `isSyncing` from WatchConnectivity's outstanding file

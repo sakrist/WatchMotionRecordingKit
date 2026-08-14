@@ -445,6 +445,8 @@ extension WatchRecordingCoordinator {
         motionStartupTimeoutTask = nil
         DispatchQueue.main.async {
             guard self.isRecording, self.currentSessionID == sessionID else { return }
+            guard self.recordingLifecycle.fail(sessionID: sessionID) else { return }
+            self.cancelStartupTask(sessionID: sessionID)
             if self.usesPhoneRecording {
                 self.logger.info("Stopping iPhone video after motion capture failure. session=\(sessionID, privacy: .public)")
                 self.transport.sendRecordingControl(action: .stop, sessionID: sessionID)

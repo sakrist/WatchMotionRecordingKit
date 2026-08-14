@@ -31,9 +31,6 @@ public final class WatchRecordingCoordinator: ObservableObject {
     /// The independent 800 Hz raw-acceleration count is stored in final metadata.
     @Published public internal(set) var sampleCount = 0
 
-    /// Shared base name for the files belonging to the current session.
-    @Published public internal(set) var currentFileName: String?
-
     /// Latest user-acceleration vector magnitude, measured in g.
     @Published public internal(set) var latestAccelMagnitude = 0.0
 
@@ -114,7 +111,9 @@ public final class WatchRecordingCoordinator: ObservableObject {
     var activeMotionSessionID: String?
     var actualDeviceMotionFrequency: UInt16 = WatchMotionBinaryStream.deviceMotion.nominalFrequencyHz
     var actualRawAccelerometerFrequency: UInt16 = WatchMotionBinaryStream.rawAccelerometer.nominalFrequencyHz
-    private var isStartingRecording = false
+    @MainActor var recordingLifecycle = WatchRecordingLifecycle()
+    @MainActor var startupTask: Task<Void, Never>?
+    @MainActor var startupTaskSessionID: String?
     // Startup is complete only after callbacks confirm both required frequencies.
     var deviceMotionStartupConfirmed = false
     var rawAccelerometerStartupConfirmed = false
@@ -181,24 +180,22 @@ public final class WatchRecordingCoordinator: ObservableObject {
     ///
     /// Repeated start requests are ignored while a session is starting or active.
     /// Detailed startup is in `WatchRecordingCoordinator+Session.swift`.
+    @MainActor
     public func startRecording() {
-        guard !isRecording, !isStartingRecording else { return }
         guard isHighFrequencyRecordingSupported else {
             logger.error("High-frequency recording is unavailable. deviceMotionSupported=\(Self.isHighFrequencyRecordingSupported, privacy: .public)")
             setStatus("Recording is not supported on this Watch.")
             return
         }
 
+        let sessionID = Self.makeSessionID()
+        guard recordingLifecycle.beginStartup(sessionID: sessionID) else { return }
+
         logger.info("Recording start requested")
-        isStartingRecording = true
         isPreparing = true
-        Task { [weak self] in
-            guard let self else { return }
-            await self.startRecordingSession()
-            await MainActor.run {
-                self.isStartingRecording = false
-                self.isPreparing = false
-            }
+        startupTaskSessionID = sessionID
+        startupTask = Task { @MainActor [weak self] in
+            await self?.startRecordingSession(sessionID: sessionID)
         }
     }
 
@@ -207,28 +204,46 @@ public final class WatchRecordingCoordinator: ObservableObject {
     /// Sensor sources are stopped and their serial queue is fully drained before
     /// file headers or metadata are finalized. This prevents late callbacks from
     /// writing into files that have already been transferred.
+    @MainActor
     public func stopRecording() {
-        guard isRecording else { return }
+        guard let stopAction = recordingLifecycle.beginStop() else { return }
+
+        if case .cancelStartup(let sessionID) = stopAction {
+            cancelStartupTask(sessionID: sessionID)
+            if currentSessionID == sessionID {
+                if usesPhoneRecording {
+                    transport.sendRecordingControl(action: .stop, sessionID: sessionID)
+                }
+                cleanupIncompleteSession()
+            }
+            isRecording = false
+            isArmed = false
+            countdownSecondsRemaining = nil
+            recordingStartedAt = nil
+            isPreparing = false
+            statusMessage = "Stopped"
+            return
+        }
+
+        guard case .finishRecording(let sessionID) = stopAction else { return }
 
         // Stop optional phone video immediately. Motion files still need to drain
         // and finalize, but that work must not keep the iPhone recording screen
         // open or extend the video past the user's stop action.
-        if let sessionID = currentSessionID, usesPhoneRecording {
+        if usesPhoneRecording {
             transport.sendRecordingControl(action: .stop, sessionID: sessionID)
             usesPhoneRecording = false
         }
 
-        Task { @MainActor [weak self] in
-            self?.isArmed = false
-            self?.countdownSecondsRemaining = nil
-            self?.recordingStartedAt = nil
-        }
+        isArmed = false
+        countdownSecondsRemaining = nil
+        recordingStartedAt = nil
 
         do {
             // This also force-writes any records left in the one-second buffers.
             try stopMotionCaptureAndDrain()
             audioCapture.stop()
-            guard let sessionID = currentSessionID,
+            guard currentSessionID == sessionID,
                   let deviceMotionWriter,
                   let rawAccelerometerWriter,
                   let currentDeviceMotionFileURL,
@@ -277,35 +292,38 @@ public final class WatchRecordingCoordinator: ObservableObject {
             // WatchConnectivity confirms them individually.
             transport.transferRecordingFiles(sessionID: sessionID, fileURLs: files)
             refreshPendingSyncSessionCount()
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.sampleCount = Int(deviceMotionSummary.sampleCount)
-                self.isRecording = false
-                self.recordingStartedAt = nil
-                self.statusMessage = "Stopped (queued motion)"
-            }
+            _ = recordingLifecycle.finishStop(sessionID: sessionID)
+            sampleCount = Int(deviceMotionSummary.sampleCount)
+            isRecording = false
+            recordingStartedAt = nil
+            statusMessage = "Stopped (queued motion)"
         } catch {
             logger.error("Recording finish failed. session=\(self.currentSessionID ?? "none", privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            _ = recordingLifecycle.fail(sessionID: sessionID)
             cleanupIncompleteSession()
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.isRecording = false
-                self.isArmed = false
-                self.countdownSecondsRemaining = nil
-                self.recordingStartedAt = nil
-                self.statusMessage = "Failed to finish: \(error.localizedDescription)"
-            }
+            isRecording = false
+            isArmed = false
+            countdownSecondsRemaining = nil
+            recordingStartedAt = nil
+            statusMessage = "Failed to finish: \(error.localizedDescription)"
         }
     }
 
-    /// Compatibility alias for clients that previously called `startLogging()`.
-    public func startLogging() {
-        startRecording()
+    @MainActor
+    func finishStartupTask(sessionID: String) {
+        guard startupTaskSessionID == sessionID else { return }
+        startupTask = nil
+        startupTaskSessionID = nil
+        isPreparing = false
     }
 
-    /// Compatibility alias for clients that previously called `stopLogging()`.
-    public func stopLogging() {
-        stopRecording()
+    @MainActor
+    func cancelStartupTask(sessionID: String) {
+        guard startupTaskSessionID == sessionID else { return }
+        startupTask?.cancel()
+        startupTask = nil
+        startupTaskSessionID = nil
+        isPreparing = false
     }
 
     // MARK: - Live Telemetry

@@ -72,9 +72,6 @@ enum WatchRecordingStartTiming {
 enum WatchMotionCaptureError: LocalizedError {
     case unsupported
     case motionAccessDenied
-    case deviceMotionUnavailable
-    case rawAccelerometerUnavailable
-    case microphonePermissionDenied
     case phoneSyncUnavailable
     case emptyStream
     case unexpectedDeviceMotionFrequency(Int)
@@ -87,12 +84,6 @@ enum WatchMotionCaptureError: LocalizedError {
             return "Recording is not supported on this Watch."
         case .motionAccessDenied:
             return "Motion access is disabled for this Watch app"
-        case .deviceMotionUnavailable:
-            return "200 Hz device motion did not start"
-        case .rawAccelerometerUnavailable:
-            return "800 Hz raw acceleration did not start"
-        case .microphonePermissionDenied:
-            return "Microphone permission denied"
         case .phoneSyncUnavailable:
             return "iPhone video could not be prepared for this recording"
         case .emptyStream:
