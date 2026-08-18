@@ -53,7 +53,7 @@ has no binary sample-count or hash contract in this package.
 
 Both sensor files have explicit 64-byte little-endian headers. The Watch generates one UUID per recording, uses its lowercase string form for asset names and metadata, and encodes its native 16 bytes in both headers. Device-motion records are 60 bytes and contain a Unix-microsecond timestamp, user acceleration, rotation rate, gravity, and quaternion as Float32 values. Raw-accelerometer records are 20 bytes and contain a timestamp plus three acceleration components as Float32 values. The streams retain their independent timestamps and are never assumed to be row-aligned.
 
-The metadata sidecar names both files and records their finalized byte sizes, SHA-256 hashes, format versions, actual frequencies, and sample counts. `applicationPayloads` remains available for app-owned sidecar data such as strike ratings.
+The metadata sidecar names both files and records their finalized byte sizes, SHA-256 hashes, format versions, actual frequencies, sample counts, numeric `createdUnix`, and human-readable ISO 8601 UTC `created`. `applicationPayloads` remains available for app-owned sidecar data such as strike ratings.
 
 The coordinator buffers accepted samples for about one second per stream before
 writing, then forces any final partial batch during stop. Stopping capture
@@ -122,3 +122,35 @@ required whenever video is present. `RecordingPackageLayout` and
 `RecordingPackageDescriptor` provide the canonical names and filesystem shape
 validation. They intentionally do not replace the existing binary readers or
 JSON validators.
+
+### Optional reviewed labels
+
+A reviewed package may also contain `<uuid>.labels.json` at its root. The file
+is optional: no labels file is written until a reviewer exports one, and its
+absence never invalidates the core recording. Consumers preserve the file when
+copying, storing, backing up, restoring, or sharing packages even if they do
+not show labels yet.
+
+Version 1 uses one chronological, non-overlapping set of canonical 200 Hz
+device-motion ranges. Each range is `strike`, exactly 80 samples long, and
+stores both indexes and the matching Unix-microsecond endpoint timestamps. The
+impact sample is implicit: `endIndex - 39`.
+
+```json
+{
+  "formatVersion": 1,
+  "sessionID": "<uuid>",
+  "labels": [{
+    "label": "strike",
+    "startIndex": 45934,
+    "endIndex": 46013,
+    "startTimestampUnixMicroseconds": 1777546234708000,
+    "endTimestampUnixMicroseconds": 1777546235103000
+  }]
+}
+```
+
+`RecordingPackageDescriptor` recognizes the exact filename but does not parse
+it. Label-aware consumers validate it separately; if it is malformed or does
+not match the binary stream, they ignore it while retaining access to the core
+recording.

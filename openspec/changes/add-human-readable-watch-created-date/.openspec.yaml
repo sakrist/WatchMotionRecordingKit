@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-08-18
+goal: Include an ISO 8601 creation date in each Watch recording sidecar.

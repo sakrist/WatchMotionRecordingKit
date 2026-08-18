@@ -171,6 +171,7 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
     public let actualRawAccelerometerFrequency: Int
     public let attitudeReferenceFrame: String?
     public let createdUnix: Double
+    public let created: String
     public let deviceMotionFileName: String?
     public let deviceMotionByteCount: UInt64?
     public let deviceMotionSHA256: String?
@@ -214,6 +215,7 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
         self.actualRawAccelerometerFrequency = actualRawAccelerometerFrequency
         self.attitudeReferenceFrame = attitudeReferenceFrame
         self.createdUnix = createdUnix
+        self.created = Self.iso8601CreatedDate(from: createdUnix)
         self.deviceMotionFileName = deviceMotionFileName
         self.deviceMotionByteCount = deviceMotionByteCount
         self.deviceMotionSHA256 = deviceMotionSHA256
@@ -237,6 +239,7 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
         case actualRawAccelerometerFrequency
         case attitudeReferenceFrame
         case createdUnix
+        case created
         case deviceMotionFileName
         case deviceMotionByteCount
         case deviceMotionSHA256
@@ -261,6 +264,8 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
         actualRawAccelerometerFrequency = try container.decodeIfPresent(Int.self, forKey: .actualRawAccelerometerFrequency) ?? 800
         attitudeReferenceFrame = try container.decodeIfPresent(String.self, forKey: .attitudeReferenceFrame)
         createdUnix = try container.decode(Double.self, forKey: .createdUnix)
+        created = try container.decodeIfPresent(String.self, forKey: .created)
+            ?? Self.iso8601CreatedDate(from: createdUnix)
         deviceMotionFileName = try container.decodeIfPresent(String.self, forKey: .deviceMotionFileName)
         deviceMotionByteCount = try container.decodeIfPresent(UInt64.self, forKey: .deviceMotionByteCount)
         deviceMotionSHA256 = try container.decodeIfPresent(String.self, forKey: .deviceMotionSHA256)
@@ -326,5 +331,9 @@ public struct WatchRecordingMetadata: Codable, Sendable, Equatable {
             rawAccelerometerSaturationCount: rawAccelerometerSaturationCount,
             applicationPayloads: applicationPayloads ?? self.applicationPayloads
         )
+    }
+
+    private static func iso8601CreatedDate(from unixTime: Double) -> String {
+        ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: unixTime))
     }
 }

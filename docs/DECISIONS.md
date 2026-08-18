@@ -1,5 +1,10 @@
 # Decisions
 
+## 2026-08-18 — Include a human-readable Watch sidecar creation date
+
+Keep `createdUnix` as the timing value and encode `created` as its ISO 8601 UTC
+representation. Existing sidecars derive the new value at decode time.
+
 ## 2026-08-14 — Identify and cancel recording startup by session
 
 Watch recording lifecycle uses explicit idle, starting, recording, and stopping

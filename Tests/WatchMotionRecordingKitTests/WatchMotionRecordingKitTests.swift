@@ -459,6 +459,23 @@ final class WatchMotionRecordingKitTests: XCTestCase {
         XCTAssertEqual(decoded.deviceMotionSampleCount, 1)
         XCTAssertEqual(decoded.rawAccelerometerSampleCount, 1)
         XCTAssertEqual(decoded.applicationPayloads, ["rating": "good"])
+        XCTAssertEqual(decoded.created, "1970-01-01T00:01:39Z")
+    }
+
+    func testMetadataDerivesCreatedDateForAnOlderSidecar() throws {
+        let metadata = WatchRecordingMetadata(
+            sessionID: UUID().uuidString,
+            plannedStartUnix: 100,
+            actualWatchStartUnix: 100,
+            createdUnix: 99
+        )
+        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(metadata)) as? [String: Any]
+        object?.removeValue(forKey: "created")
+        let olderSidecar = try JSONSerialization.data(withJSONObject: try XCTUnwrap(object))
+
+        let decoded = try JSONDecoder().decode(WatchRecordingMetadata.self, from: olderSidecar)
+
+        XCTAssertEqual(decoded.created, "1970-01-01T00:01:39Z")
     }
 
     func testPendingStoreGroupsBinaryPairAndMetadataUnderOneSession() throws {
@@ -626,6 +643,59 @@ final class WatchMotionRecordingKitTests: XCTestCase {
             descriptor.phoneMetadataURL?.lastPathComponent,
             RecordingPackageLayout.assetFileName(.phoneMetadata, sessionID: sessionID)
         )
+    }
+
+    func testCorePackageAcceptsOptionalLabelsWithoutChangingProfile() throws {
+        let rootURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let sessionID = "00112233-4455-4677-8899-aabbccddeeff"
+        let packageURL = RecordingPackageLayout.packageURL(in: rootURL, sessionID: sessionID)
+        try FileManager.default.createDirectory(at: packageURL, withIntermediateDirectories: true)
+
+        for kind in RecordingPackageAssetKind.allCases where kind.isCoreAsset {
+            let fileURL = RecordingPackageLayout.assetURL(kind, in: packageURL, sessionID: sessionID)
+            XCTAssertTrue(FileManager.default.createFile(atPath: fileURL.path, contents: Data()))
+        }
+        let labelsURL = RecordingPackageLayout.assetURL(.labels, in: packageURL, sessionID: sessionID)
+        XCTAssertTrue(FileManager.default.createFile(atPath: labelsURL.path, contents: Data("not JSON".utf8)))
+
+        let descriptor = try RecordingPackageDescriptor(packageURL: packageURL, expectedProfile: .core)
+        XCTAssertEqual(descriptor.profile, .core)
+        XCTAssertEqual(descriptor.labelsURL, labelsURL)
+        XCTAssertEqual(descriptor.allAssetURLs.count, 4)
+    }
+
+    func testPackageLabelsValidateCanonicalIndexesAndTimestamps() throws {
+        let sessionID = "00112233-4455-4677-8899-aabbccddeeff"
+        let records = (0..<80).map { deviceRecord(timestamp: Int64(1_700_000_000_000_000 + ($0 * 5_000))) }
+        let labels = RecordingPackageLabels(
+            sessionID: sessionID,
+            labels: [
+                .init(
+                    startIndex: 0,
+                    endIndex: 79,
+                    startTimestampUnixMicroseconds: records[0].timestampUnixMicroseconds,
+                    endTimestampUnixMicroseconds: records[79].timestampUnixMicroseconds
+                ),
+            ]
+        )
+
+        XCTAssertNoThrow(try labels.validate(expectedSessionID: sessionID, deviceMotionRecords: records))
+
+        let wrongTimestamp = RecordingPackageLabels(
+            sessionID: sessionID,
+            labels: [
+                .init(
+                    startIndex: 0,
+                    endIndex: 79,
+                    startTimestampUnixMicroseconds: 0,
+                    endTimestampUnixMicroseconds: records[79].timestampUnixMicroseconds
+                ),
+            ]
+        )
+        XCTAssertThrowsError(try wrongTimestamp.validate(expectedSessionID: sessionID, deviceMotionRecords: records)) {
+            XCTAssertEqual($0 as? RecordingPackageLabelsError, .timestampMismatch)
+        }
     }
 
     private func rawRecord(timestamp: Int64, x: Double) -> WatchRawAccelerometerBinaryRecord {

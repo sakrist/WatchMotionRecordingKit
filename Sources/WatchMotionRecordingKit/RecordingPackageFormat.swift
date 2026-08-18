@@ -8,13 +8,14 @@ public enum RecordingPackageAssetKind: String, CaseIterable, Codable, Sendable {
     case audio
     case video
     case phoneMetadata
+    case labels
 
     /// Whether this asset is required for every recording package.
     public var isCoreAsset: Bool {
         switch self {
         case .deviceMotion, .rawAccelerometer, .watchMetadata:
             return true
-        case .audio, .video, .phoneMetadata:
+        case .audio, .video, .phoneMetadata, .labels:
             return false
         }
     }
@@ -88,6 +89,8 @@ public enum RecordingPackageLayout {
             return WatchRecordingAssetNaming.videoFileName(sessionID: sessionID)
         case .phoneMetadata:
             return WatchRecordingAssetNaming.phoneMetadataFileName(sessionID: sessionID)
+        case .labels:
+            return "\(WatchRecordingAssetNaming.baseName(sessionID: sessionID)).labels.json"
         }
     }
 
@@ -131,6 +134,9 @@ public struct RecordingPackageDescriptor: Equatable, Sendable {
     public let audioURL: URL?
     public let videoURL: URL?
     public let phoneMetadataURL: URL?
+    /// Optional reviewer-authored labels. Its JSON is validated separately so
+    /// malformed annotations never make the recorded motion streams unreadable.
+    public let labelsURL: URL?
 
     public init(
         packageURL: URL,
@@ -183,8 +189,12 @@ public struct RecordingPackageDescriptor: Equatable, Sendable {
             throw RecordingPackageError.videoMetadataRequired
         }
 
+        // Labels annotate an otherwise core recording. Media extensions still
+        // determine the capture profile so existing core callers accept labels.
         let profile: RecordingPackageProfile =
-            assets.keys.contains(where: { !$0.isCoreAsset }) ? .extended : .core
+            assets.keys.contains(where: { kind in
+                !kind.isCoreAsset && kind != .labels
+            }) ? .extended : .core
         if let expectedProfile, expectedProfile != profile {
             throw RecordingPackageError.profileMismatch(expected: expectedProfile, actual: profile)
         }
@@ -198,10 +208,11 @@ public struct RecordingPackageDescriptor: Equatable, Sendable {
         self.audioURL = assets[.audio]
         self.videoURL = assets[.video]
         self.phoneMetadataURL = assets[.phoneMetadata]
+        self.labelsURL = assets[.labels]
     }
 
     public var allAssetURLs: [URL] {
-        [deviceMotionURL, rawAccelerometerURL, watchMetadataURL, audioURL, videoURL, phoneMetadataURL]
+        [deviceMotionURL, rawAccelerometerURL, watchMetadataURL, audioURL, videoURL, phoneMetadataURL, labelsURL]
             .compactMap { $0 }
     }
 }

@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  Project: WatchMotionRecordingKit
+
+  This Swift package owns the canonical folder-based `<uuid>.mmrec` recording
+  format used by the apps, IMU analyzer, and CNN training workflow. Required
+  core assets are 200 Hz device-motion and 800 Hz raw-accelerometer binary
+  streams plus Watch metadata. The shared package descriptor validates package
+  shape and identity; content readers validate stream and JSON semantics.
+
+  Optional labels are an intentional package asset, not app-private data. A
+  valid core recording may omit labels. Consumers preserve a recognized labels
+  asset even when they do not yet present label UI.
+
+rules:
+  proposal:
+    - Keep core recording validity separate from optional annotation validity.
+    - State user-visible package hand-off behavior and explicit non-goals.
+  design:
+    - Preserve exact existing binary byte contracts unless the change explicitly requires a binary format version.
+    - Define asset naming, optionality, schema validation, and consumer preservation behavior.
+  tasks:
+    - Keep planning tasks unchecked until the user explicitly authorizes implementation.
+    - Include focused package-shape, schema, consumer-preservation, and documentation verification.
